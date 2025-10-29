@@ -1,0 +1,65 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.venv/
+venv/
+.env
+.env.*
+
+# --- ROS / Catkin / CMake ---
+build/
+devel/
+log/
+logs/
+.ccls-cache/
+compile_commands.json
+catkin_generated/
+CMakeFiles/
+CMakeCache.txt
+CTestTestfile.cmake
+cmake_install.cmake
+Makefile
+*.launch~  # backups do editor
+
+# --- ROS runtime / Stage / Gazebo artefatos ---
+*.bag
+*.dae
+*.world~
+*.stl
+*.urdf~
+*.sdf~
+*.model~
+/.worlds/*.world~
+/.worlds/*_stage*.png
+
+# --- Editor / SO ---
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# --- Projetos específicos (gerados em runtime) ---
+/worlds/airspace.world
+/worlds/*_stage*.png
+/worlds/*_muro*.png
+/worlds/*_bw*.png
+/graph/pontos_cruzamentos.txt
+/graph/pontos_construcoes.txt
+/graph/grafo.txt
+/graph/grafo_fundo_branco_bw*.png
+/graph/*_stage*.png
+/graph/__pycache__/
+
+# --- Logs ROS locais ---
+/home/*/.ros/
+*.log
+*.test
+
+# --- Arquivos temporários ---
+*.tmp
+*.bak
+*~

@@ -1,0 +1,6 @@
+# Request vazio
+---
+float64 soc                 # 0..1
+float64 voltage             # Voltagem nominal estimada (V)
+float64 current             # Corrente instantânea estimada (A)
+float64 remaining_minutes   # Autonomia estimada (min)

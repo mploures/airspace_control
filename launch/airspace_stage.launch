@@ -1,0 +1,12 @@
+<launch>
+  <arg name="nvants" default="3"/>
+  <arg name="sep_px" default="5"/>
+  <arg name="max_wh" default="200"/>
+
+  <node name="map_and_stage"
+        pkg="airspace_control"
+        type="create_map_and_launch_stage.sh"
+        args="$(arg nvants) $(arg sep_px) $(arg max_wh)"
+        output="screen"
+        required="true"/>
+</launch>

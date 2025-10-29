@@ -1,0 +1,37 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>airspace_control</name>
+  <version>0.1.0</version>
+  <description>The airspace_control package (Supervisory UAV control for Stage)</description>
+
+  <maintainer email="mploures@todo.todo">mploures</maintainer>
+  <license>MIT</license>
+
+  <!-- URLs (opcional) -->
+  <url type="website">http://wiki.ros.org/airspace_control</url>
+
+  <!-- Ferramenta de build -->
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <!-- Dependências para gerar serviços -->
+  <build_depend>message_generation</build_depend>
+  <exec_depend>message_runtime</exec_depend>
+
+  <!-- Dependências ROS padrão -->
+  <build_depend>rospy</build_depend>
+  <build_depend>std_msgs</build_depend>
+  <build_depend>geometry_msgs</build_depend>
+  <build_depend>nav_msgs</build_depend>
+  <build_depend>sensor_msgs</build_depend>
+
+  <exec_depend>rospy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+
+  <!-- Exportações -->
+  <export>
+    <!-- Nenhuma configuração extra necessária -->
+  </export>
+</package>
