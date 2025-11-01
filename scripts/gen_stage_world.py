@@ -7,6 +7,43 @@ import numpy as np
 # -----------------------------
 # Parse do grafo.txt
 # -----------------------------
+
+def compute_spawn_yaws(robot_poses_m, W_px, H_px, mode="radial", min_sep_deg=20):
+    """
+    Gera yaw distinto por robô.
+    - radial: aponta do centro do mapa para fora (reduz confrontos frontais)
+    - spread: uniformemente distribuídos em 2π
+    - random: aleatório, com separação mínima
+    """
+    Cx, Cy = W_px / 2.0, H_px / 2.0
+    N = len(robot_poses_m)
+    yaws = []
+
+    def sep_ok(th, used, eps):
+        for u in used:
+            d = abs((th - u + math.pi) % (2*math.pi) - math.pi)
+            if d < eps:
+                return False
+        return True
+
+    for i, (x, y) in enumerate(robot_poses_m):
+        if mode == "spread":
+            th = 2.0 * math.pi * i / max(1, N)
+        elif mode == "random":
+            th = random.uniform(-math.pi, math.pi)
+        else:  # radial
+            th = math.atan2(y - Cy, x - Cx)
+
+        eps = math.radians(min_sep_deg)
+        tries = 0
+        while not sep_ok(th, yaws, eps) and tries < 72:
+            th = ((th + eps + math.pi) % (2*math.pi)) - math.pi
+            tries += 1
+
+        yaws.append(th)
+    return yaws
+
+
 def read_grafo_txt(path):
     nodes = {}
     with open(path, 'r', encoding='utf-8') as f:
@@ -332,8 +369,19 @@ def candidate_for_angle(center, corners, theta, sep, W, H, global_pts,
 def generate_world_text_layers(bitmap_graph_low, bitmap_muro_high,
                                W_px, H_px,
                                robot_poses_m, robot_size_m,
-                               low_height=0.05, wall_height=2.0, robot_z=0.30):
-    # >>> NOVO: muro 10% maior que o background
+                               low_height=0.05, wall_height=2.0,
+                               robot_z=1.0,
+                               sense_walls=False,
+                               collide_walls=False,
+                               robot_yaws=None,
+                               robot_height_m=0.30,          # <<< NOVO: altura do corpo do robô
+                               lidar_pose_rel=None):          # <<< NOVO: (lx, ly, lz, lyaw)
+    # Se não for informado, coloca o LIDAR no meio do corpo (Z = metade da altura)
+    if lidar_pose_rel is None:
+        lidar_pose_rel = (0.0, 0.0, robot_height_m/2.0, 0.0)
+
+    lx, ly, lz, lyaw = lidar_pose_rel
+
     wall_W = W_px * 1.10
     wall_H = H_px * 1.10
 
@@ -346,26 +394,34 @@ def generate_world_text_layers(bitmap_graph_low, bitmap_muro_high,
   gui_outline 0
   gripper_return 0
   fiducial_return 0
-  laser_return 1
-  obstacle_return 1
 )
 
 define topurg ranger
 (
-  sensor( range [ 0.01 10.0 ] fov 360 samples 360 )
-  laser_return 1
-  obstacle_return 1
+  # o "corpo" do sensor não colide nem reflete laser
+  obstacle_return 0
+  laser_return 0
+
+  # o que o sensor enxerga
+  sensor(
+    range [ 0.01 5.0 ]
+    fov 360
+    samples 360
+    obstacle_return 1
+  )
+
   color "black"
   size [0.100 0.100 0.100]
 )
 
 define erratic position
 (
-  size [{robot_size_m:.2f} {robot_size_m:.2f} {robot_z:.2f}]
-  laser_return 1
+  size [{robot_size_m:.2f} {robot_size_m:.2f} {robot_height_m:.2f}]
+  # Robôs são visíveis uns aos outros (evitação)
   obstacle_return 1
+  laser_return 1
   drive "diff"
-  topurg(pose [ 0 0 0 0 ])
+  topurg(pose [ {lx:.3f} {ly:.3f} {lz:.3f} {lyaw:.3f} ])  # <<< LIDAR NO MEIO
 )
 
 window (
@@ -384,7 +440,7 @@ window (
   show_occupancy 0
 )
 
-# --- camada baixa: grafo (apenas visual / altura baixa) ---
+# --- camada baixa: grafo (visual) ---
 floorplan
 (
   name "graph_low"
@@ -392,23 +448,31 @@ floorplan
   color "black"
   size [{W_px:.3f} {H_px:.3f} {low_height:.3f}]
   pose [{W_px/2:.3f} {H_px/2:.3f} 0.0 0.0]
+  obstacle_return 0
+  laser_return 0
 )
 
-# --- camada alta: MURO (borda com altura) ---
+# --- camada alta: MURO (real/opcional) ---
 floorplan
 (
   name "muro_high"
   bitmap "{bitmap_muro_high}"
   color "black"
   size [{wall_W:.3f} {wall_H:.3f} {wall_height:.3f}]
-  # mantém o mesmo centro do background para expandir 5% para cada lado
   pose [{W_px/2:.3f} {H_px/2:.3f} 0.0 0.0]
+  obstacle_return {1 if collide_walls else 0}
+  laser_return {1 if sense_walls else 0}
 )
 '''
     body = []
     for i, (x, y) in enumerate(robot_poses_m):
-        body.append(f'erratic( pose [ {x:.3f} {y:.3f} {robot_z:.3f} 0.000 ] name "vant_{i}" color "{color_for(i)}")')
+        yaw = (robot_yaws[i] if (robot_yaws and i < len(robot_yaws)) else 0.0)
+        body.append(
+            f'erratic( pose [ {x:.3f} {y:.3f} {robot_z:.3f} {yaw:.3f} ] name "vant_{i}" color "{color_for(i)}")'
+        )
     return header + "\n".join(body) + "\n"
+
+
 
 
 # -----------------------------
@@ -579,48 +643,71 @@ def main():
         nodes = None
 
     # 6) Posições: exatamente os "depósitos" (VANTPORT quando não houver DEPOSITO).
+    
     placed_px = []
     if nodes:
         deposits = get_deposit_points_from_grafo(nodes)
         if not deposits:
-            print("[WARN] grafo.txt sem depósitos/VANTPORT identificados; caindo para fallback por ângulos.")
+            print("[WARN] grafo.txt sem depósitos/VANTPORT identificados; nada a posicionar.")
         else:
             if len(deposits) < args.nvants:
                 print(f"[WARN] Só {len(deposits)} pontos-base para {args.nvants} VANTs. "
-                      f"Usando pontos-base e completando com fallback.")
-            for p in deposits[:args.nvants]:
-                placed_px.append(tuple(map(int, p)))
+                      f"Distribuindo ciclicamente os VANTs ao redor dos mesmos pontos.")
 
-            faltam = args.nvants - len(placed_px)
-            if faltam > 0:
-                vports = [{'label': f'DEP_{i}', 'center': p, 'corners': []}
-                          for i, p in enumerate(placed_px)]
-                sep = max(1, int(args.sep_px))
-                r_min = max(sep + 1, 6)
-                step_r = max(2, int(sep))
-                angle_iters = [gap_angles_from_segments(vp['center'], vp['corners'], 3)
-                               for vp in vports] or [gap_angles_from_segments((W//2, H//2), [], 3)]
-                while faltam > 0:
-                    progressed = False
-                    for it in angle_iters:
-                        try:
-                            theta = next(it)
-                        except StopIteration:
-                            continue
-                        cand = candidate_for_angle(
-                            center=placed_px[0] if placed_px else (W//2, H//2),
-                            corners=[], theta=theta,
-                            sep=sep, W=W, H=H, global_pts=placed_px,
-                            r_min=r_min, step_r=step_r, max_push=4000
-                        )
-                        if cand is not None:
-                            placed_px.append(cand)
-                            faltam -= 1
-                            progressed = True
-                            if faltam == 0:
+            n_vants = args.nvants
+            n_ports = len(deposits)
+
+            # número balanceado de VANTs por VANTPORT
+            base_per_port = n_vants // n_ports
+            extra = n_vants % n_ports
+            distribution = [base_per_port + (1 if i < extra else 0) for i in range(n_ports)]
+
+            # distância física mínima entre centros
+            robot_d = args.robot_size_m
+            safety_margin = 5.0
+            min_sep = robot_d + safety_margin
+
+            for i, (cx, cy) in enumerate(deposits):
+                cx, cy = map(int, (cx, cy))
+                n_here = distribution[i]
+                if n_here == 0:
+                    continue
+
+                # o primeiro VANT fica exatamente sobre o ponto do VANTPORT
+                placed_px.append((cx, cy))
+
+                # define raio base de afastamento em função do tamanho físico
+                radius = min_sep
+                camada = 1
+
+                for j in range(1, n_here):
+                    # calcula ângulo de distribuição equilibrada (uniforme em 360°)
+                    angle = 2 * math.pi * (j - 1) / max(1, n_here - 1)
+
+                    # coordenadas candidatas
+                    x_new = int(round(cx + radius * math.cos(angle)))
+                    y_new = int(round(cy + radius * math.sin(angle)))
+
+                    # checa colisão global
+                    ok = False
+                    attempt = 0
+                    while not ok and attempt < 20:
+                        ok = True
+                        for (px, py) in placed_px:
+                            if math.hypot(px - x_new, py - y_new) < min_sep:
+                                ok = False
                                 break
-                    if not progressed:
-                        step_r = max(1, step_r - 1)
+                        if not ok:
+                            # aumenta o raio e tenta novamente
+                            camada += 1
+                            radius = (robot_d + safety_margin) * camada
+                            x_new = int(round(cx + radius * math.cos(angle)))
+                            y_new = int(round(cy + radius * math.sin(angle)))
+                        attempt += 1
+
+                    placed_px.append((x_new, y_new))
+
+
 
     if not placed_px:
         # fallback (sem pontos-base)
@@ -696,7 +783,9 @@ def main():
     else:
         robot_poses_m = [to_stage_xy(x, y, W_used, H_used) for (x, y) in placed_px]
 
-    # 9) Gera .world com duas camadas: grafo baixo + muro alto
+    z = 1.0  # altitude absoluta do robô no Stage
+    robot_yaws = compute_spawn_yaws(robot_poses_m, W_used, H_used, mode="radial", min_sep_deg=12.0)
+
     world_text = generate_world_text_layers(
         bitmap_graph_low=graph_name_used,
         bitmap_muro_high=muro_name_used,
@@ -705,8 +794,14 @@ def main():
         robot_size_m=args.robot_size_m,
         low_height=0.05,
         wall_height=2.00,
-        robot_z=1
+        robot_z=z,
+        sense_walls=True,
+        collide_walls=True,
+        robot_yaws=robot_yaws,
+        robot_height_m=0.30,             # <<< mantém altura do corpo usada no world
+        lidar_pose_rel=(0.0, 0.0, -0.15, 0.0)  # <<< LIDAR exatamente no meio do corpo
     )
+
     out_path = args.out or os.path.join(worlds_dir, 'airspace.world')
     with open(out_path, 'w', encoding='utf-8') as f:
         f.write(world_text)
@@ -722,7 +817,8 @@ def main():
     print(f"  - size: [{W_used:.2f} {H_used:.2f}] m  resolution=1 px/m  (downscale s={s:.3f})")
     print(f"  - VANTs: {len(robot_poses_m)}/{args.nvants}")
     for i, (x, y) in enumerate(robot_poses_m):
-        print(f"    vant_{i}: pose [{x:.2f} {y:.2f} 0 0]  (z=0.30)  color={color_for(i)}")
+        print(f"    vant_{i}: pose [{x:.2f} {y:.2f} {z:.2f} 0]  (z={z:.2f})  color={color_for(i)}")
+
 
 
 if __name__ == '__main__':

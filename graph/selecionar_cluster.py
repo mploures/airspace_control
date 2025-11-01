@@ -376,14 +376,14 @@ def desenhar_grafo_mapa(imagem_path, ret, grafo, output_path, raio=8):
             seen.add(e)
             p1 = adj(grafo[u]["posicao"])
             p2 = adj(grafo[v]["posicao"])
-            cv2.line(img, p1, p2, (255, 255, 255), 2)
+            cv2.line(img, p1, p2, (0, 0, 0), 5)
 
     # nós
     for nid, info in grafo.items():
         x, y = adj(info["posicao"])
         cor = cores[info["tipo"]]
         cv2.circle(img, (int(x), int(y)), raio, cor, -1)
-        cv2.circle(img, (int(x), int(y)), raio, (255, 255, 255), 1)
+
 
     if output_path:
         out_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
@@ -537,7 +537,7 @@ def criar_sistema_logistico(
 # Exemplo de uso direto
 # ---------------------------
 if __name__ == "__main__":
-    N_VANTPORT, N_ESTACAO, N_FORNECEDOR, N_CLIENTE = 2, 2, 2, 4
+    N_VANTPORT, N_ESTACAO, N_FORNECEDOR, N_CLIENTE = 1, 1, 2, 3
 
     res = criar_sistema_logistico(
         N_VANTPORT,
@@ -548,8 +548,8 @@ if __name__ == "__main__":
         arquivo_construcoes="pontos_construcoes.txt",
         imagem_mapa="mapafinal.png",
         output_dir="sistema_logistico",
-        dist_minima_pontos=100,
-        dist_minima_borda=300,
+        dist_minima_pontos=0,
+        dist_minima_borda=500,
     )
 
     if res:

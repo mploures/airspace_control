@@ -1,0 +1,88 @@
+<launch>
+  <!-- ============================================================= -->
+  <!-- 🔧 PARÂMETROS DE CONFIGURAÇÃO -->
+  <!-- ============================================================= -->
+  <arg name="nvants" default="3"/>
+  <arg name="sep_px" default="5"/>
+  <arg name="max_wh" default="200"/>
+
+  <arg name="graph_path" default="$(find airspace_control)/graph/sistema_logistico/grafo.txt"/>
+  <arg name="start_node" default="VANTPORT_0"/>
+
+  <!-- ============================================================= -->
+  <!-- 🗺️ 1. Geração do mapa e mundo Stage -->
+  <!-- ============================================================= -->
+  <node name="map_and_stage"
+        pkg="airspace_control"
+        type="create_map_and_launch_stage.sh"
+        args="$(arg nvants) $(arg sep_px) $(arg max_wh)"
+        output="screen"
+        required="true"/>
+
+  <!-- ============================================================= -->
+  <!-- 🚁 2. Inicialização dos VANTs físicos (uav_agent.py) -->
+  <!-- ============================================================= -->
+  <group ns="vant_0">
+    <node name="uav_agent"
+          pkg="airspace_control"
+          type="uav_agent.py"
+          output="screen"
+          args=""
+          required="true">
+      <param name="robot_name" value="vant_0"/>
+    </node>
+  </group>
+
+  <group ns="vant_1">
+    <node name="uav_agent"
+          pkg="airspace_control"
+          type="uav_agent.py"
+          output="screen"
+          args=""
+          required="true">
+      <param name="robot_name" value="vant_1"/>
+    </node>
+  </group>
+
+  <group ns="vant_2">
+    <node name="uav_agent"
+          pkg="airspace_control"
+          type="uav_agent.py"
+          output="screen"
+          args=""
+          required="true">
+      <param name="robot_name" value="vant_2"/>
+    </node>
+  </group>
+
+  <!-- ============================================================= -->
+  <!-- 🧠 3. Controladores (AutomatonNode / ControladorVANT) -->
+  <!-- ============================================================= -->
+  <node name="controller_vant_0"
+        pkg="airspace_control"
+        type="main.py"
+        output="screen">
+    <param name="graph_path" value="$(arg graph_path)"/>
+    <param name="start_node" value="$(arg start_node)"/>
+    <param name="robot_name" value="vant_0"/>
+  </node>
+
+  <node name="controller_vant_1"
+        pkg="airspace_control"
+        type="main.py"
+        output="screen">
+    <param name="graph_path" value="$(arg graph_path)"/>
+    <param name="start_node" value="$(arg start_node)"/>
+    <param name="robot_name" value="vant_1"/>
+  </node>
+
+  <node name="controller_vant_2"
+        pkg="airspace_control"
+        type="main.py"
+        output="screen">
+    <param name="graph_path" value="$(arg graph_path)"/>
+    <param name="start_node" value="$(arg start_node)"/>
+    <param name="robot_name" value="vant_2"/>
+  </node>
+
+</launch>

@@ -47,6 +47,7 @@ Thumbs.db
 /worlds/*_stage*.png
 /worlds/*_muro*.png
 /worlds/*_bw*.png
+/worlds/.png
 /graph/pontos_cruzamentos.txt
 /graph/pontos_construcoes.txt
 /graph/grafo.txt

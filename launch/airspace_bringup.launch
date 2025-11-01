@@ -1,0 +1,24 @@
+<launch>
+  <!-- Parâmetros -->
+  <arg name="nvants" default="3"/>
+  <arg name="sep_px" default="5"/>
+  <arg name="max_wh" default="200"/>
+
+  <!-- 1) Gera o mapa e inicia o Stage (bloqueia em stageros, ok!) -->
+  <node name="map_and_stage"
+        pkg="airspace_control"
+        type="v2_create_map_and_launch_stage.sh"
+        args="$(arg nvants) $(arg sep_px) $(arg max_wh)"
+        output="screen"
+        required="true"/>
+
+  <!-- 2) Sobe a central que instancia N VANTs (objetos da classe VANT) e envia 3 metas por VANT -->
+  <node name="multi_vant_manager"
+        pkg="airspace_control"
+        type="multi_vant_manager.py"
+        output="screen">
+    <param name="nvants" value="$(arg nvants)"/>
+    <!-- opcional: margens internas para metas (m) -->
+    <param name="goal_margin" value="3.0"/>
+  </node>
+</launch>
