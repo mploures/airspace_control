@@ -7,7 +7,7 @@
   <arg name="max_wh" default="200"/>
 
   <arg name="graph_path" default="$(find airspace_control)/graph/sistema_logistico/grafo.txt"/>
-  <arg name="start_node" default="VANTPORT_0"/>
+  <arg name="start_node" default="VERTIPORT_0"/>
 
   <!-- ============================================================= -->
   <!-- 🗺️ 1. Geração do mapa e mundo Stage -->

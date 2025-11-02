@@ -1,7 +1,10 @@
 
+# -*- coding: utf-8 -*-
 import networkx as nx
 import matplotlib.pyplot as plt
 import re
+
+__all__ = ["carregar_grafo_txt", "desenhar_grafo"]
 
 # -----------------------------------------------------------------------------
 # Função para ler grafo.txt
@@ -55,7 +58,7 @@ def desenhar_grafo(G, pos, titulo="Grafo Logístico (a partir do grafo.txt)"):
     clientes  = [n for n, d in G.nodes(data=True) if d["tipo"] == "CLIENTE"]
     fornecedores = [n for n, d in G.nodes(data=True) if d["tipo"] == "FORNECEDOR"]
     estacoes  = [n for n, d in G.nodes(data=True) if d["tipo"] == "ESTACAO"]
-    vantports = [n for n, d in G.nodes(data=True) if d["tipo"] == "VANTPORT"]
+    vertiports = [n for n, d in G.nodes(data=True) if d["tipo"] == "VERTIPORT"]
 
     # Desenho das arestas
     nx.draw_networkx_edges(G, pos, width=1.2, alpha=0.6)
@@ -65,7 +68,7 @@ def desenhar_grafo(G, pos, titulo="Grafo Logístico (a partir do grafo.txt)"):
     nx.draw_networkx_nodes(G, pos, nodelist=estacoes, node_color="#1f77b4", node_shape="s", node_size=160, label="Estações")
     nx.draw_networkx_nodes(G, pos, nodelist=fornecedores, node_color="#2ca02c", node_shape="o", node_size=160, label="Fornecedores")
     nx.draw_networkx_nodes(G, pos, nodelist=clientes, node_color="#ff7f0e", node_shape="D", node_size=160, label="Clientes")
-    nx.draw_networkx_nodes(G, pos, nodelist=vantports, node_color="#d62728", node_shape="^", node_size=180, label="Vantports")
+    nx.draw_networkx_nodes(G, pos, nodelist=vertiports, node_color="#d62728", node_shape="^", node_size=180, label="vertiports")
 
     plt.legend()
     plt.title(titulo)

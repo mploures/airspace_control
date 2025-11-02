@@ -153,7 +153,7 @@ def get_deposit_points_from_grafo(nodes):
     """
     Coleta pontos de depósito a partir do grafo.
     - Aceita DEPOSITO/DEPOSIT/DEP/DEPO (quando existem)
-    - **E também VANTPORT** (trata como “depósito” operacional/inicial).
+    - **E também VERTIPORT** (trata como “depósito” operacional/inicial).
     """
     deps = []
     for label, info in nodes.items():
@@ -161,7 +161,7 @@ def get_deposit_points_from_grafo(nodes):
         lbl = (label or '').upper()
         if (t in {'DEPOSITO', 'DEPOSIT', 'DEP', 'DEPO'} or
             'DEPOS' in t or 'DEPOS' in lbl or
-            t == 'VANTPORT'):
+            t == 'VERTIPORT'):
             deps.append(info['pos'])
     return deps
 
@@ -642,13 +642,13 @@ def main():
     else:
         nodes = None
 
-    # 6) Posições: exatamente os "depósitos" (VANTPORT quando não houver DEPOSITO).
+    # 6) Posições: exatamente os "depósitos" (VERTIPORT quando não houver DEPOSITO).
     
     placed_px = []
     if nodes:
         deposits = get_deposit_points_from_grafo(nodes)
         if not deposits:
-            print("[WARN] grafo.txt sem depósitos/VANTPORT identificados; nada a posicionar.")
+            print("[WARN] grafo.txt sem depósitos/VERTIPORT identificados; nada a posicionar.")
         else:
             if len(deposits) < args.nvants:
                 print(f"[WARN] Só {len(deposits)} pontos-base para {args.nvants} VANTs. "
@@ -657,7 +657,7 @@ def main():
             n_vants = args.nvants
             n_ports = len(deposits)
 
-            # número balanceado de VANTs por VANTPORT
+            # número balanceado de VANTs por VERTIPORT
             base_per_port = n_vants // n_ports
             extra = n_vants % n_ports
             distribution = [base_per_port + (1 if i < extra else 0) for i in range(n_ports)]
@@ -673,7 +673,7 @@ def main():
                 if n_here == 0:
                     continue
 
-                # o primeiro VANT fica exatamente sobre o ponto do VANTPORT
+                # o primeiro VANT fica exatamente sobre o ponto do VERTIPORT
                 placed_px.append((cx, cy))
 
                 # define raio base de afastamento em função do tamanho físico
@@ -715,12 +715,12 @@ def main():
         vports = []
         if nodes:
             for label, info in nodes.items():
-                if (info.get('tipo', '') or '').upper() == 'VANTPORT':
+                if (info.get('tipo', '') or '').upper() == 'VERTIPORT':
                     center = info['pos']
                     vports.append({'label': label, 'center': center, 'corners': []})
         if not vports:
             if not points_path:
-                raise RuntimeError("Sem pontos-base (VANTPORT/DEPOSITO) e sem pontos_* para fallback.")
+                raise RuntimeError("Sem pontos-base (VERTIPORT/DEPOSITO) e sem pontos_* para fallback.")
             pts = read_points_txt(points_path)
             if not pts:
                 raise RuntimeError(f"Arquivo de pontos vazio: {points_path}")

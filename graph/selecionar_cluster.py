@@ -208,7 +208,7 @@ def atribuir_tipos(construcoes_roi, N_V, N_E, N_F, N_C, dist_min=50):
 
     saida = []
     for tipo, N in [
-        ("VANTPORT", N_V),
+        ("VERTIPORT", N_V),
         ("ESTACAO", N_E),
         ("FORNECEDOR", N_F),
         ("CLIENTE", N_C),
@@ -354,7 +354,7 @@ def desenhar_grafo_mapa(imagem_path, ret, grafo, output_path, raio=8):
         draw_offset = False
 
     cores = {
-        "VANTPORT": (255, 0, 0),
+        "VERTIPORT": (255, 0, 0),
         "ESTACAO": (0, 0, 255),
         "FORNECEDOR": (0, 255, 0),
         "CLIENTE": (255, 255, 0),
@@ -404,7 +404,7 @@ def salvar_grafo_txt(grafo, output_path):
 # Função principal
 # ===========================
 def criar_sistema_logistico(
-    N_VANTPORT,
+    N_VERTIPORT,
     N_ESTACAO,
     N_FORNECEDOR,
     N_CLIENTE,
@@ -451,7 +451,7 @@ def criar_sistema_logistico(
         return None
 
     ii = integral_from_points(construcoes, H, W)
-    demanda = 2 * (N_VANTPORT + N_ESTACAO + N_FORNECEDOR + N_CLIENTE)
+    demanda = 2 * (N_VERTIPORT + N_ESTACAO + N_FORNECEDOR + N_CLIENTE)
 
     melhor, area_best = None, 1 << 62
     for (x1, y1, x2, y2) in rects:
@@ -488,7 +488,7 @@ def criar_sistema_logistico(
     construcoes_roi = [p for p in construcoes if (x1 <= p[0] <= x2 and y1 <= p[1] <= y2)]
     pts_atribuidos = atribuir_tipos(
         construcoes_roi,
-        N_VANTPORT,
+        N_VERTIPORT,
         N_ESTACAO,
         N_FORNECEDOR,
         N_CLIENTE,
@@ -537,10 +537,10 @@ def criar_sistema_logistico(
 # Exemplo de uso direto
 # ---------------------------
 if __name__ == "__main__":
-    N_VANTPORT, N_ESTACAO, N_FORNECEDOR, N_CLIENTE = 1, 1, 2, 3
+    N_VERTIPORT, N_ESTACAO, N_FORNECEDOR, N_CLIENTE = 1, 1, 2, 3
 
     res = criar_sistema_logistico(
-        N_VANTPORT,
+        N_VERTIPORT,
         N_ESTACAO,
         N_FORNECEDOR,
         N_CLIENTE,

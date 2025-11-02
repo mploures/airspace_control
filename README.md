@@ -55,7 +55,7 @@ airspace_control/
 ✅ Geração automática de **mapas e mundos Stage** a partir de descrições gráficas  
 ✅ Identificação de cruzamentos e construções via **processamento de imagem (OpenCV)**  
 ✅ Construção de **grafos logísticos** com entidades:
-- **VANTPORT** – bases de decolagem e pouso  
+- **VERTIPORT** – bases de decolagem e pouso  
 - **ESTACAO** – pontos de controle e coordenação  
 - **FORNECEDOR** – origem de missões/logística  
 - **CLIENTE** – destino de entrega/missão  
