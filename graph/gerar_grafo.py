@@ -81,7 +81,7 @@ def desenhar_grafo(G, pos, titulo="Grafo Logístico (a partir do grafo.txt)"):
 # Execução direta
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
-    caminho = "graph/sistema_logistico/grafo.txt"  # coloque o caminho do seu arquivo aqui
+    caminho = "graph/sistema_logistico/grafo_recortado.txt"  # coloque o caminho do seu arquivo aqui
     G, pos = carregar_grafo_txt(caminho)
     print(f"Grafo carregado: {len(G.nodes())} nós, {len(G.edges())} arestas")
     desenhar_grafo(G, pos)
