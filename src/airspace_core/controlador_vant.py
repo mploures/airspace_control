@@ -91,12 +91,13 @@ class ControladorVANT:
         self.eventos: Dict[str, Any] = self.gerarAlfabeto()
 
         # Modelos
-        self._automato_movimento()
+        self._automato_movimento()              # especificação
         self._automatos_arestas()
         self._automato_modos()
         self._modelos_suporte()
         self._automato_mapa()                   # especificação
         self._automato_bateria_movimento()      # especificação
+        self._automatos_localizacao_tarefas()   # especificação
 
     # ------------------------- Aux -------------------------
     def _tipo_norm(self, t: Any) -> str:
@@ -197,7 +198,7 @@ class ControladorVANT:
 
         A = dfa(trs, Parado, f"movimento{self._suf}")
         self.Dicionario_Automatos["movimento"] = A
-        self.plantas.append(A)
+        self.specs.append(A)
 
     # --------------------- Plantas: Arestas (cap=1) ----------------------
     def _automatos_arestas(self):
@@ -237,11 +238,6 @@ class ControladorVANT:
         geral = state(f"geral{self._suf}", marked=True)
         trs = []
 
-        # movimentação não muda modo
-        for u, v, k, data in self.G.edges(keys=True, data=True):
-            trs.append((geral, self._ev(f"pega_{u}{v}_{self.id_num}"), geral))
-            trs.append((geral, self._ev(f"pega_{v}{u}_{self.id_num}"), geral))
-
         # Trabalho
         for n in self.G.nodes():
             tipo = self._tipo_norm(self.G.nodes[n].get("tipo", ""))
@@ -276,14 +272,14 @@ class ControladorVANT:
             (s_com, self._ev(f"termina_tarefa_{self.id_num}"), s_com),
         ], s_com, f"comunicacao{self._suf}")
         self.Dicionario_Automatos["comunicacao"] = Acom
-        self.plantas.append(Acom)
+        #self.plantas.append(Acom)
 
         # Vivacidade
         s_vivo = state(f"vivo{self._suf}", marked=True)
         Aviv = dfa([(s_vivo, self._ev(f"check_vivacidade_{self.id_num}"), s_vivo)],
                    s_vivo, f"vivacidade{self._suf}")
         self.Dicionario_Automatos["vivacidade"] = Aviv
-        self.plantas.append(Aviv)
+        #self.plantas.append(Aviv)
 
         # Bateria (monitor)
         s_bat = state(f"bat{self._suf}", marked=True)
@@ -316,43 +312,75 @@ class ControladorVANT:
         self.Dicionario_Automatos["mapa"] = A
         self.specs.append(A)
 
-    # ------------- Especificação: Bateria x Movimento --------------------
+    # ------------- Especificação: Bateria carregamento --------------------
     def _automato_bateria_movimento(self):
+        """
+        Autômato de especificação para interação entre nível de bateria e movimento.
+
+        - Estado s_norm: bateria normal (marcado)
+        - Estado s_low: bateria baixa
+        - Evento 'bateria_baixa_*' leva para s_low
+        - Qualquer evento de carregamento ('carregar_*' ou 'fim_carregar_*')
+        faz retornar a s_norm
+        """
         s_norm = state(f"bat_normal{self._suf}", marked=True)
         s_low  = state(f"bat_baixa{self._suf}")
         e_low  = self._ev(f"bateria_baixa_{self.id_num}")
 
-        trs = [(s_norm, e_low, s_low), (s_low, e_low, s_low)]
+        # transições iniciais: baixar bateria
+        trs = [
+            (s_norm, e_low, s_low),
+            (s_low, e_low, s_low)
+        ]
 
-        # volta ao normal ao terminar carga em QUALQUER ESTACAO/VERTIPORT
+        # eventos de recarga retornam a s_norm
         for n in self.G.nodes():
             tipo = self._tipo_norm(self.G.nodes[n].get("tipo", ""))
             if tipo in {"ESTACAO", "VERTIPORT"}:
-                e_ok = self._ev(f"fim_carregar_{n}_{self.id_num}")
-                trs.append((s_low, e_ok, s_norm))
-                trs.append((s_norm, e_ok, s_norm))
-
-        # arestas autorizadas em baixa bateria: que tocam ESTACAO/VERTIPORT
-        arestas_permitidas_baixa = set()
-        for u, v, k, data in self.G.edges(keys=True, data=True):
-            tu = self._tipo_norm(self.G.nodes[u].get("tipo", ""))
-            tv = self._tipo_norm(self.G.nodes[v].get("tipo", ""))
-            if (tu in {"ESTACAO", "VERTIPORT","LOGICO"}) or (tv in {"ESTACAO", "VERTIPORT","LOGICO"}):
-                arestas_permitidas_baixa.add((u, v, k))
-
-        for u, v, k, data in self.G.edges(keys=True, data=True):
-            e_uv = self._ev(f"pega_{u}{v}_{self.id_num}")
-            e_vu = self._ev(f"pega_{v}{u}_{self.id_num}")
-
-            # normal: sempre aceita
-            trs.append((s_norm, e_uv, s_norm))
-            trs.append((s_norm, e_vu, s_norm))
-
-            # baixa: só se a aresta tocar ESTACAO/VERTIPORT
-            if (u, v, k) in arestas_permitidas_baixa:
-                trs.append((s_low, e_uv, s_low))
-                trs.append((s_low, e_vu, s_low))
-
+                e_ini = self._ev(f"carregar_{n}_{self.id_num}")
+                trs.extend([
+                    (s_low, e_ini, s_norm),
+                    (s_norm, e_ini, s_norm),
+                ])
+    
+        # construir DFA e registrar
         A = dfa(trs, s_norm, f"MovimentoBateria{self._suf}")
         self.Dicionario_Automatos["bat_mov"] = accessible(A)
         self.specs.append(self.Dicionario_Automatos["bat_mov"])
+
+    def _automatos_localizacao_tarefas(self):
+        for n in self.G.nodes():
+            tipo = self._tipo_norm(self.G.nodes[n].get("tipo", ""))
+            if tipo not in {"FORNECEDOR", "CLIENTE", "ESTACAO"}:
+                continue
+
+            s_in  = state(f"dentro_{n}{self._suf}")
+            s_out = state(f"fora_{n}{self._suf}", marked=True)
+            trs = []
+
+            # 1) Entrada no nó: qualquer libera_{x n}
+            for x in self.G.neighbors(n):
+                e_lib = self._ev(f"libera_{x}{n}_{self.id_num}")
+                trs.append((s_out, e_lib, s_in))
+
+            # 2) Saída do nó: qualquer pega_{n x}
+            for x in self.G.neighbors(n):
+                e_pega = self._ev(f"pega_{n}{x}_{self.id_num}")
+                trs.append((s_in, e_pega, s_out))
+
+            # 3) Tarefas locais apenas quando "dentro"
+            if tipo in {"FORNECEDOR", "CLIENTE"}:
+                e_ini = self._ev(f"comeca_trabalho_{n}_{self.id_num}")
+                trs.append((s_in, e_ini, s_in))
+            if tipo == "ESTACAO":
+                e_ini = self._ev(f"carregar_{n}_{self.id_num}")
+                trs.append((s_in, e_ini, s_in))
+
+            A = dfa(trs, s_out, f"loc_{n}{self._suf}")
+            self.Dicionario_Automatos[f"loc_{n}"] = A
+            self.specs.append(A)
+
+
+
+
+

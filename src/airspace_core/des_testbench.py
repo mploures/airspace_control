@@ -424,17 +424,18 @@ def main():
         print("  [ERRO] DFA 'movimento' não encontrado.")
 
     # 7) Supervisor
+    plants = tuple(ctrl.plantas)   
+    specs  = tuple(ctrl.specs)
+
+    print(f"plants:{len(plants)}")
+    print(f"specs:{len(specs)}")
+
     if args.supervisores != "none":
         sup = _build_supervisors(ctrl, args.supervisores)
         if not sup:
             print("[SUP][ERRO] Nenhum supervisor retornado.")
         else:
             supervisor = sup[0]
-            plants = tuple(ctrl.plantas)   
-            specs  = tuple(ctrl.specs)
-
-            print(f"plants:{len(plants)}")
-            print(f"specs:{len(specs)}")
             # Versão segura para coleções IEnumerable da UltraDES:
             qs  = _to_list(states(supervisor))
             evs = _to_list(events(supervisor))
