@@ -8,7 +8,7 @@ from airspace_control.srv import GotoXY, GotoXYRequest
 
 # ---- tenta importar a classe VANT do seu arquivo uav_agent.py ----
 try:
-    from uav_agent import VANT
+    from airspace_core.uav_agent import VANT
 except Exception as _e:
     import importlib.util
     rp = rospkg.RosPack().get_path('airspace_control')
