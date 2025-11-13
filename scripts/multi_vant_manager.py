@@ -12,7 +12,7 @@ try:
 except Exception as _e:
     import importlib.util
     rp = rospkg.RosPack().get_path('airspace_control')
-    _path = os.path.join(rp, 'scripts', 'uav_agent.py')
+    _path = os.path.join(rp, 'airspace_core', 'uav_agent.py')
     spec = importlib.util.spec_from_file_location("uav_agent", _path)
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
