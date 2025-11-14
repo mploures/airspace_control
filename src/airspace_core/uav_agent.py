@@ -68,6 +68,7 @@ class OdomTracker:
         self.y = 0.0
         self.ready = False
         self._lock = threading.Lock()
+        self._pending_release_event=None
 
         # Principal
         self._sub1 = rospy.Subscriber(
@@ -588,7 +589,14 @@ class VANT:
                         self.goal = None
                         v_cmd, w_cmd = 0.0, 0.0
 
+                        if self._pending_release_event:
+                            msg = String(data=self._pending_release_event)
+                            self.pub_event_out.publish(msg)
+                            self.ros_node.loginfo(
+                                f"[{self.name}] 📡 Evento de liberação publicado automaticamente: '{self._pending_release_event}'"
+                            )
 
+                        self._pending_release_event = None
 
                         # Encerra loop de controle deste VANT (como já estava no seu código)
                         break

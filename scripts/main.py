@@ -25,79 +25,115 @@ def _cb_event_with_move(inst, vant):
     """
     Cria e retorna a função de callback que processa eventos do /event,
     integrando a transição do supervisor (inst) com a definição do objetivo
-    físico (vant.goal) e a lógica de parada.
+    físico (vant.goal), a lógica de parada e a geração automática de 'libera_*'.
     """
     from std_msgs.msg import String
-    
+
     def callback(msg: String):
         ev = str(msg.data or "").strip()
         vant.ros_node.loginfo(f"[{vant.name}] ➡️ Recebido evento: '{ev}'")
-        
+
         # 1. Lógica de PING
         if ev == "ping":
             inst._publish_ros()
             return
-        
+
         # 2. Lógica de Transição de Estado do Supervisor
-        if inst.step(ev):
-            ev_gen = inst.to_generic(ev)
-            
-            # Log de transição (sempre exibido após transição OK)
-            vant.ros_node.loginfo(f"[{vant.name}] 🔄 Transição OK: '{ev}' ")
-            
-            # 3. Lógica de Decisão de Movimento/Parada
-            if ev_gen.startswith("pega_"):
-                # É um evento de movimento -> Define o novo objetivo
-                pos_entry = inst.posicoes.get(ev_gen)
-                
-                # CORREÇÃO: Verificar se pos_entry existe e tem o formato esperado
-                if pos_entry is not None:
-                    # CORREÇÃO: Verificar estrutura interna
-                    if isinstance(pos_entry, tuple) and len(pos_entry) == 2:
-                        # CORREÇÃO: Desempacotamento correto - agora temos (event_obj, (label, (x, y)))
-                        event_obj, coord_entry = pos_entry
-                        
-                        # Agora desempacotar coord_entry que é (label, (x, y))
-                        if isinstance(coord_entry, tuple) and len(coord_entry) == 2:
-                            label, coordinates = coord_entry
-                            original_x, original_y = coordinates
-                            
-                            print(f"[DEBUG] pos_entry: {pos_entry}")
-                            print(f"[DEBUG] event_obj: {event_obj}")
-                            print(f"[DEBUG] label: {label}, x: {original_x}, y: {original_y}")
-                            
-                            if not isinstance(original_x, (int, float)) or not isinstance(original_y, (int, float)):
-                                vant.ros_node.logerr(f"[{vant.name}] ERRO: Coordenadas obtidas para '{ev_gen}' não são números: {pos_entry}")
-                                vant._stop_movement()
-                                return
+        if not inst.step(ev):
+            # Evento não é deste VANT (id diferente, etc.)
+            return
 
-                            # Apenas define o goal. O loop de controle do VANT (def run) cuidará do movimento.
-                            vant.goal = (original_x, original_y)
-                            vant.ros_node.loginfo(f"[{vant.name}] 🎯 Meta Supervisor. Destino REAL (Stage): ({original_x:.2f}, {original_y:.2f}).")
-                            vant.spin()
+        ev_gen = inst.to_generic(ev)
+        vant.ros_node.loginfo(f"[{vant.name}] 🔄 Transição OK: '{ev}' (gen='{ev_gen}')")
 
-                        
-                        else:
-                            vant._stop_movement()
-                            vant.ros_node.logwarn(f"[{vant.name}] Formato inválido de coordenadas internas para '{ev_gen}': {coord_entry}")
-                    else:
+        # 3. Lógica de Decisão de Movimento/Parada
+        if ev_gen.startswith("pega_"):
+            # É um evento de movimento -> Define o novo objetivo
+            pos_entry = inst.posicoes.get(ev_gen)
+
+            # Esperamos: pos_entry == (event_obj, (label, (x, y)))
+            if pos_entry is not None and isinstance(pos_entry, tuple) and len(pos_entry) == 2:
+                event_obj, coord_entry = pos_entry
+
+                if isinstance(coord_entry, tuple) and len(coord_entry) == 2:
+                    label, coordinates = coord_entry
+                    original_x, original_y = coordinates
+
+                    print(f"[DEBUG] pos_entry: {pos_entry}")
+                    print(f"[DEBUG] event_obj: {event_obj}")
+                    print(f"[DEBUG] label: {label}, x: {original_x}, y: {original_y}")
+
+                    if not isinstance(original_x, (int, float)) or not isinstance(original_y, (int, float)):
+                        vant.ros_node.logerr(
+                            f"[{vant.name}] ERRO: Coordenadas obtidas para '{ev_gen}' não são números: {pos_entry}"
+                        )
+                        # não queremos liberar aresta errada depois
+                        vant._pending_release_event = None
                         vant._stop_movement()
-                        vant.ros_node.logwarn(f"[{vant.name}] Formato inválido de pos_entry para '{ev_gen}': {pos_entry}")
-                else:
-                    vant._stop_movement()
-                    vant.ros_node.logwarn(f"[{vant.name}] Transição 'pega_' ocorreu, mas coordenada para '{ev_gen}' não encontrada ou inválida.")
-            
-            elif ev_gen.startswith("libera_"):
-                # É um evento de liberação de aresta -> Parada imediata
-                vant._stop_movement()
-                vant.ros_node.loginfo(f"[{vant.name}] 🛑 Parada forçada por evento de liberação ('{ev_gen}').")
+                        return
 
+                    # Define o objetivo físico (coordenadas no Stage)
+                    vant.goal = (original_x, original_y)
+                    vant.ros_node.loginfo(
+                        f"[{vant.name}] 🎯 Meta Supervisor. Destino REAL (Stage): ({original_x:.2f}, {original_y:.2f})."
+                    )
+
+                    # ---- Cálculo do evento de liberação correspondente ----
+                    # ev_gen = "pega_<origem><destino>"
+                    libera_gen = "libera_" + ev_gen[len("pega_"):]
+                    # Usa o mapeamento genérico -> evento com sufixo _{id}
+                    libera_id = inst.event_map.get(libera_gen)
+
+                    if libera_id is None:
+                        # Se por algum motivo não existir no supervisor
+                        vant._pending_release_event = None
+                        vant.ros_node.logwarn(
+                            f"[{vant.name}] Não encontrei evento de liberação correspondente para '{ev_gen}' "
+                            f"(esperado gen='{libera_gen}')."
+                        )
+                    else:
+                        # Guardamos no VANT para publicar quando o objetivo for atingido
+                        vant._pending_release_event = libera_id
+                        vant.ros_node.loginfo(
+                            f"[{vant.name}] ⏱️ Ao atingir o objetivo será publicado '{libera_id}' em /event."
+                        )
+
+                    # Inicia o loop de controle até chegar no destino
+                    vant.spin()
+                    return
+
+                else:
+                    vant._pending_release_event = None
+                    vant._stop_movement()
+                    vant.ros_node.logwarn(
+                        f"[{vant.name}] Formato inválido de coordenadas internas para '{ev_gen}': {coord_entry}"
+                    )
             else:
-                # O evento é de controle (ex: 'solta_')
+                vant._pending_release_event = None
                 vant._stop_movement()
-                vant.ros_node.loginfo(f"[{vant.name}] 🛑 Evento não-movimento ('{ev_gen}'). Meta física resetada.")
+                vant.ros_node.logwarn(
+                    f"[{vant.name}] Transição 'pega_' ocorreu, mas coordenada para '{ev_gen}' "
+                    f"não encontrada ou inválida: {pos_entry}"
+                )
+
+        elif ev_gen.startswith("libera_"):
+            # Evento de liberação vindo de fora (painel, etc.)
+            vant._pending_release_event = None
+            vant._stop_movement()
+            vant.ros_node.loginfo(
+                f"[{vant.name}] 🛑 Parada forçada por evento de liberação recebido ('{ev_gen}')."
+            )
+
+        else:
+            # Evento de controle (não-movimento)
+            vant._pending_release_event = None
+            vant._stop_movement()
+            vant.ros_node.loginfo(
+                f"[{vant.name}] 🛑 Evento não-movimento ('{ev_gen}'). Meta física resetada."
+            )
 
     return callback
+
 
 
 def resolve_grafo_path(rel="graph/sistema_logistico/grafo_recortado.txt"):

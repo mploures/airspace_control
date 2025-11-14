@@ -382,7 +382,7 @@ def generate_world_text_layers(bitmap_graph_low, bitmap_muro_high,
 
     lx, ly, lz, lyaw = lidar_pose_rel
 
-    wall_W = W_px * 1.05
+    wall_W = W_px * 1.1
     wall_H = H_px * 1.05
 
     header = f'''define floorplan model (
