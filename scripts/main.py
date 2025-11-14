@@ -1,173 +1,259 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""
+test_vant_ros.py — ROS + UltraDES com isolamento do runtime .NET
+
+Comportamento:
+- Se DOTNET_ROOT detectado: tenta CoreCLR.
+- Senão: cai para Mono, mas com spawn e sem carregar UltraDES no processo pai.
+
+Ambos os casos evitam o crash do Mono (jit_tls) por evitar fork após carregar CLR.
+"""
+import math
 import os
-import re
 import sys
+import time
 import argparse
-import subprocess
-import signal
+from multiprocessing import Process, set_start_method
+import re
+from std_msgs.msg import String 
 import rospy
-import networkx as nx
+import rospkg
 
-from airspace_control.srv import GetBattery, GotoXY  # noqa: F401
-from airspace_core.controlador_vant import ControladorVANT
-
-# ------------------------------ util ------------------------------
-def carregar_grafo_txt(caminho_arquivo):
-    G = nx.Graph()
-    pos = {}
-    with open(caminho_arquivo, 'r', encoding='utf-8') as f:
-        linhas = [l.strip() for l in f.readlines() if l.strip()]
-    for linha in linhas[1:]:
-        m = re.match(r'^([^,]+),([^,]+),\(([^,]+),([^)]+)\),(.*)$', linha)
-        if not m:
-            rospy.logwarn(f"[grafo.txt] Linha ignorada (formato incorreto): {linha}")
-            continue
-        tipo_no = m.group(1).strip()
-        label   = m.group(2).strip()
-        x = float(m.group(3).strip()); y = float(m.group(4).strip())
-        pos[label] = (x, y)
-        G.add_node(label, tipo=tipo_no)
-        resto = m.group(5).strip()
-        if resto:
-            conectados = [p.strip() for p in resto.split(',') if p.strip()]
-            for c in conectados:
-                if c != label:
-                    G.add_edge(label, c)
-    return G, pos
-
-class DummyVANT:
-    def __init__(self, name): self.name = name
-
-# ------------------------------ WORKER ------------------------------
-def run_worker(role, graph_path, start_node, robot_name, spawn_edges=False):
-    # NUNCA chame init_node aqui. Quem fará é a AutomatonNode.
-    G_raw, pos = carregar_grafo_txt(graph_path)
-    G = nx.MultiGraph()
-    G.add_nodes_from(G_raw.nodes(data=True))
-    G.add_edges_from(G_raw.edges())
-    for n in G.nodes():
-        if n in pos: G.nodes[n]["pos"] = tuple(pos[n])
-    if start_node not in G.nodes: start_node = next(iter(G.nodes))
-
-    ROLE_TO_METHOD = {
-        "movimento":    "_dfa_movimento_as_node",
-        "modos":        "_dfa_modos_as_node",
-        "mapa":         "_dfa_mapa_as_node",
-        "suporte":      "_dfas_suporte_as_nodes",
-        "bateria_mov":  "_dfa_bateria_mov_as_node",
-        "arestas":      "_dfas_arestas_as_nodes",
-    }
-    if role not in ROLE_TO_METHOD:
-        raise ValueError(f"Role inválido: {role}")
-
-    original_builder = ControladorVANT._construir_automatos
-
-    def only_one_automaton(self):
-        method_name = ROLE_TO_METHOD[role]
-        if method_name == "_dfas_arestas_as_nodes" and not spawn_edges:
-            rospy.logwarn("[worker] Arestas desabilitadas (spawn_edges=False).")
+def _cb_event_with_move(inst, vant):
+    """
+    Cria e retorna a função de callback que processa eventos do /event,
+    integrando a transição do supervisor (inst) com a definição do objetivo
+    físico (vant.goal) e a lógica de parada.
+    """
+    from std_msgs.msg import String
+    
+    def callback(msg: String):
+        ev = str(msg.data or "").strip()
+        vant.ros_node.loginfo(f"[{vant.name}] ➡️ Recebido evento: '{ev}'")
+        
+        # 1. Lógica de PING
+        if ev == "ping":
+            inst._publish_ros()
             return
-        getattr(self, method_name)()
+        
+        # 2. Lógica de Transição de Estado do Supervisor
+        if inst.step(ev):
+            ev_gen = inst.to_generic(ev)
+            
+            # Log de transição (sempre exibido após transição OK)
+            vant.ros_node.loginfo(f"[{vant.name}] 🔄 Transição OK: '{ev}' ")
+            
+            # 3. Lógica de Decisão de Movimento/Parada
+            if ev_gen.startswith("pega_"):
+                # É um evento de movimento -> Define o novo objetivo
+                pos_entry = inst.posicoes.get(ev_gen)
+                
+                # CORREÇÃO: Verificar se pos_entry existe e tem o formato esperado
+                if pos_entry is not None:
+                    # CORREÇÃO: Verificar estrutura interna
+                    if isinstance(pos_entry, tuple) and len(pos_entry) == 2:
+                        # CORREÇÃO: Desempacotamento correto - agora temos (event_obj, (label, (x, y)))
+                        event_obj, coord_entry = pos_entry
+                        
+                        # Agora desempacotar coord_entry que é (label, (x, y))
+                        if isinstance(coord_entry, tuple) and len(coord_entry) == 2:
+                            label, coordinates = coord_entry
+                            original_x, original_y = coordinates
+                            
+                            print(f"[DEBUG] pos_entry: {pos_entry}")
+                            print(f"[DEBUG] event_obj: {event_obj}")
+                            print(f"[DEBUG] label: {label}, x: {original_x}, y: {original_y}")
+                            
+                            if not isinstance(original_x, (int, float)) or not isinstance(original_y, (int, float)):
+                                vant.ros_node.logerr(f"[{vant.name}] ERRO: Coordenadas obtidas para '{ev_gen}' não são números: {pos_entry}")
+                                vant._stop_movement()
+                                return
 
-    ControladorVANT._construir_automatos = only_one_automaton
+                            # Apenas define o goal. O loop de controle do VANT (def run) cuidará do movimento.
+                            vant.goal = (original_x, original_y)
+                            vant.ros_node.loginfo(f"[{vant.name}] 🎯 Meta Supervisor. Destino REAL (Stage): ({original_x:.2f}, {original_y:.2f}).")
+                            vant.spin()
 
-    vant = DummyVANT(name=robot_name)
-    _ctrl = ControladorVANT(id_vant=robot_name, obj_vant=vant, grafo=G,
-                            porto_inicial=start_node, pos_dict=pos)
+                        
+                        else:
+                            vant._stop_movement()
+                            vant.ros_node.logwarn(f"[{vant.name}] Formato inválido de coordenadas internas para '{ev_gen}': {coord_entry}")
+                    else:
+                        vant._stop_movement()
+                        vant.ros_node.logwarn(f"[{vant.name}] Formato inválido de pos_entry para '{ev_gen}': {pos_entry}")
+                else:
+                    vant._stop_movement()
+                    vant.ros_node.logwarn(f"[{vant.name}] Transição 'pega_' ocorreu, mas coordenada para '{ev_gen}' não encontrada ou inválida.")
+            
+            elif ev_gen.startswith("libera_"):
+                # É um evento de liberação de aresta -> Parada imediata
+                vant._stop_movement()
+                vant.ros_node.loginfo(f"[{vant.name}] 🛑 Parada forçada por evento de liberação ('{ev_gen}').")
 
-    rospy.loginfo(f"[worker:{role}] pronto para {robot_name}.")
-    rospy.spin()
+            else:
+                # O evento é de controle (ex: 'solta_')
+                vant._stop_movement()
+                vant.ros_node.loginfo(f"[{vant.name}] 🛑 Evento não-movimento ('{ev_gen}'). Meta física resetada.")
 
-    ControladorVANT._construir_automatos = original_builder
+    return callback
 
-# ------------------------------ COORDENADOR ------------------------------
-def run_coordinator(graph_path, start_node, robot_name, spawn_edges=False):
-    # Aqui podemos inicializar, pois este processo NÃO cria AutomatonNode.
-    rospy.init_node("uav_system", anonymous=False)
 
-    G_raw, _ = carregar_grafo_txt(graph_path)
-    rospy.loginfo(f"[main] Grafo: {G_raw.number_of_nodes()} nós, {G_raw.number_of_edges()} arestas")
-    rospy.loginfo(f"[main] Robot: {robot_name} | Nó inicial: {start_node}")
+def resolve_grafo_path(rel="graph/sistema_logistico/grafo_recortado.txt"):
+    try:
+        rp = rospkg.RosPack()
+        base = rp.get_path("airspace_control")
+        p = os.path.join(base, rel)
+        if os.path.isfile(p):
+            print(f"[INFO] Arquivo encontrado: {p}")
+            return p
+    except Exception:
+        pass
+    here = os.path.dirname(os.path.abspath(__file__))
+    base2 = os.path.abspath(os.path.join(here, ".."))
+    p2 = os.path.join(base2, rel)
+    if os.path.isfile(p2):
+        print(f"[INFO] Arquivo encontrado: {p2}")
+        return p2
+    p3 = os.path.join(os.path.expanduser("~/catkin_ws/src/airspace_control"), rel)
+    if os.path.isfile(p3):
+        print(f"[INFO] Arquivo encontrado: {p3}")
+        return p3
+    print("[ERRO] Não foi possível localizar o grafo.")
+    return os.path.join(base2, rel)
 
-    roles = ["movimento", "modos", "mapa", "suporte", "bateria_mov"]
-    if spawn_edges:
-        roles.append("arestas")  # cuidado: MUITOS processos
+def run_vant_instance(vant_id: int, grafo_path: str, init_node: str, backend: str):
+    """
+    Processo filho: configura pythonnet, então importa UltraDES/controle e roda.
+    backend ∈ {"coreclr","mono"}
+    """
+    try:
+        # 1) Ambiente pythonnet ANTES de qualquer import do ultrades
+        os.environ.setdefault("PYTHONNET_CLEANUP", "0")
+        os.environ.setdefault("DOTNET_NOLOGO", "1")
 
-    this_script = os.path.abspath(__file__)
-    py = sys.executable
-    children = []
+        if backend == "coreclr":
+            os.environ["PYTHONNET_RUNTIME"] = "coreclr"
+        else:
+            os.environ["PYTHONNET_RUNTIME"] = "mono"
+            # Flags do Mono para estabilidade quando threads ROS entram:
+            os.environ.setdefault("MONO_THREADS_SUSPEND", "preemptive")
+            os.environ.setdefault("MONO_NO_SMP", "1")  # opcional em CPUs antigas/VMs
 
-    def spawn(role):
-        args = [
-            py, this_script,
-            "--role", role,
-            "--graph_path", graph_path,
-            "--start_node", start_node,
-            "--robot_name", robot_name,
-        ]
-        env = os.environ.copy()
-        env["PYTHONUNBUFFERED"] = "1"
-        p = subprocess.Popen(args, env=env)
-        rospy.loginfo(f"[main] Spawned worker '{role}' (pid={p.pid}) para {robot_name}.")
-        return p
+        # 2) Tenta carregar explicitamente o runtime
+        try:
+            from pythonnet import load as _pyload
+            _pyload(backend)
+            print(f"[VANT {vant_id}] pythonnet carregado com backend={backend}")
+        except Exception as e:
+            print(f"[WARN] Falha ao carregar backend={backend}: {e}")
+            if backend == "coreclr":
+                print("[WARN] Caindo para backend=mono.")
+                os.environ["PYTHONNET_RUNTIME"] = "mono"
+                from pythonnet import load as _pyload2
+                _pyload2("mono")
 
-    for r in roles:
-        children.append(spawn(r))
+        # 3) IMPORTS (só no filho)
+        from airspace_core.controlador_vant import GenericVANTModel, VANTInstance, VANT
 
-    def _shutdown(_sig=None, _frm=None):
-        rospy.loginfo("[main] Encerrando workers…")
-        for p in children:
-            try: p.send_signal(signal.SIGINT)
-            except Exception: pass
+        print(f"[VANT {vant_id}] Iniciando processo...")
+        if not os.path.isfile(grafo_path):
+            print(f"[ERRO VANT {vant_id}] Arquivo do grafo não encontrado: {grafo_path}")
+            return
 
-    signal.signal(signal.SIGINT, _shutdown)
-    signal.signal(signal.SIGTERM, _shutdown)
+        print(f"[VANT {vant_id}] Construindo modelo...")
+        model = GenericVANTModel(grafo_txt=grafo_path, init_node=init_node)
 
-    rospy.loginfo("[main] Sistema pronto. Publique eventos no tópico /event (std_msgs/String).")
-    rospy.spin()
-    _shutdown()
+        print(f"[VANT {vant_id}] Computando supervisor monolítico (GEN)...")
+        S = model.compute_monolithic_supervisor()
 
-# ------------------------------ ARGS ------------------------------
-def parse_args():
-    # IMPORTANTÍSSIMO: remove __name:=..., __log:=..., remappings etc.
-    argv = rospy.myargv(argv=sys.argv)
-    ap = argparse.ArgumentParser(add_help=False)  # não capturar -h do ROS
-    ap.add_argument("--role", default=None)
-    ap.add_argument("--graph_path", default=None)
-    ap.add_argument("--start_node", default=None)
-    ap.add_argument("--robot_name", default=None)
-    ap.add_argument("--spawn_edges", action="store_true")
-    args, _unknown = ap.parse_known_args(argv[1:])  # ignora o resto
-    return args
+    
+        print(f"[VANT {vant_id}] Criando VANTInstance ROS...")
+        inst = VANTInstance(
+            model=model,
+            id_num=vant_id,
+            supervisor_mono=S,
+            obj_vant=None,
+            enable_ros=True,
+            node_name=f"supervisor_vant_{vant_id}"
+        )
 
-# ------------------------------ MAIN ------------------------------
+        # DEBUG: Verificar mapeamento de coordenadas
+        print(f"[VANT {vant_id}] === DEBUG: Mapeamento de coordenadas ===")
+        print(f"[VANT {vant_id}] Posições carregadas (primeiros 5):")
+        for key, value in list(model.posicoes.items())[:5]:
+            print(f"  Nó '{key}' -> {value}")
+        
+        print(f"[VANT {vant_id}] Eventos mapeados para coordenadas (primeiros 10):")
+        for key, value in list(inst.posicoes.items())[:10]:
+            print(f"  Evento '{key}' -> {value}")
+        print(f"[VANT {vant_id}] === FIM DEBUG ===")
+
+        vant_fisico = VANT(f"vant_{vant_id}", rospy)
+
+        callback_final = _cb_event_with_move(inst, vant_fisico)
+
+        inst.sub_event.unregister() 
+
+        inst.sub_event = rospy.Subscriber("/event", String, callback_final, queue_size=50)
+
+        print(f"[VANT {vant_id}] Callback de evento atualizado com lógica de movimento.")
+        print(f"[VANT {vant_id}] Rodando ROS spin...")
+        inst.run()
+
+    except Exception as e:
+        print(f"[ERRO VANT {vant_id}] {e}")
+        import traceback; traceback.print_exc()
+
 def main():
-    args = parse_args()
+    try:
+        set_start_method("spawn", force=True)
+    except RuntimeError:
+        pass
 
-    # WORKER (chamado pelos subprocessos)
-    if args.role:
-        if not (args.graph_path and args.start_node and args.robot_name):
-            print("[worker] Faltam --graph_path/--start_node/--robot_name.", file=sys.stderr)
-            sys.exit(2)
-        run_worker(role=args.role,
-                   graph_path=args.graph_path,
-                   start_node=args.start_node,
-                   robot_name=args.robot_name,
-                   spawn_edges=args.spawn_edges)
-        return
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--nvant", type=int, default=1, help="Número de VANTs a serem criados")
+    parser.add_argument("--grafo", default=resolve_grafo_path(), help="Caminho para grafo")
+    parser.add_argument("--init", default="VERTIPORT_0", help="Nó inicial")
+    args, _ = parser.parse_known_args()
 
-    # COORDENADOR (chamado pelo roslaunch)
-    # Aqui pegamos os params privados do node lançados no .launch
-    rospy.init_node("uav_system_param", anonymous=True)
-    graph_path = rospy.get_param("~graph_path", "graph/sistema_logistico/grafo.txt")
-    start_node = rospy.get_param("~start_node", "VANTPORT_0")
-    robot_name = rospy.get_param("~robot_name", "vant_0")
-    spawn_edges = rospy.get_param("~spawn_edges", False)
-    rospy.signal_shutdown("param-ok")
+    if not os.path.isfile(args.grafo):
+        print(f"[ERRO] Arquivo do grafo não encontrado: {args.grafo}")
+        return 1
 
-    run_coordinator(graph_path, start_node, robot_name, spawn_edges=spawn_edges)
+    # Gera lista de IDs de 0 a nvant-1
+    ids = list(range(args.nvant))
+
+    backend = "mono"
+    print(f"[INFO] Backend preferido: {backend}")
+
+    print(f"[INFO] Iniciando {len(ids)} VANT(s): {ids}")
+    print(f"[INFO] Grafo: {args.grafo}")
+    print(f"[INFO] Nó inicial: {args.init}")
+    print("[INFO] Garanta que 'roscore' está ativo e abra o control_panel em outro terminal.")
+    print("-" * 60)
+
+    procs = []
+    try:
+        for vid in ids:
+            p = Process(target=run_vant_instance, args=(vid, args.grafo, args.init, backend), daemon=True)
+            p.start()
+            procs.append(p)
+            time.sleep(2.0)
+
+        print(f"[INFO] {len(procs)} processo(s) iniciado(s). Ctrl+C para encerrar.")
+        for p in procs:
+            p.join()
+
+    except KeyboardInterrupt:
+        print("\n[INFO] Encerrando...")
+        for p in procs:
+            p.terminate()
+        for p in procs:
+            p.join(timeout=2)
+        print("[INFO] Finalizado.")
+    return 0
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

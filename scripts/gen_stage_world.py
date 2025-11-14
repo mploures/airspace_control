@@ -382,8 +382,8 @@ def generate_world_text_layers(bitmap_graph_low, bitmap_muro_high,
 
     lx, ly, lz, lyaw = lidar_pose_rel
 
-    wall_W = W_px * 1.10
-    wall_H = H_px * 1.10
+    wall_W = W_px * 1.05
+    wall_H = H_px * 1.05
 
     header = f'''define floorplan model (
   color "gray90"
@@ -404,7 +404,7 @@ define topurg ranger
 
   # o que o sensor enxerga
   sensor(
-    range [ 0.01 5.0 ]
+    range [ 0.01 2.0 ]
     fov 360
     samples 360
     obstacle_return 1
@@ -664,7 +664,7 @@ def main():
 
             # distância física mínima entre centros
             robot_d = args.robot_size_m
-            safety_margin = 5.0
+            safety_margin = args.sep_px
             min_sep = robot_d + safety_margin
 
             for i, (cx, cy) in enumerate(deposits):

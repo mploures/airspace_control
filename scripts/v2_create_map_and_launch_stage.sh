@@ -3,7 +3,7 @@ set -euo pipefail
 
 NVANTS="${1:-5}"
 SEP_PX="${2:-5}"
-MAX_WH="${3:-4096}"
+MAX_WH="${3:-400}"
 
 PKG="$(rospack find airspace_control)"
 GRAFO="$PKG/graph/sistema_logistico/grafo.txt"

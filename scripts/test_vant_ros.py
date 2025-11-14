@@ -20,10 +20,7 @@ from multiprocessing import Process, set_start_method
 import rospy
 import rospkg
 
-def have_coreclr():
-    # Consideramos CoreCLR disponível se DOTNET_ROOT apontar para um diretório válido
-    root = os.environ.get("DOTNET_ROOT", "/usr/share/dotnet")
-    return os.path.isdir(root)
+
 
 def resolve_grafo_path(rel="graph/sistema_logistico/grafo_recortado.txt"):
     try:
@@ -133,7 +130,7 @@ def main():
         print("[ERRO] --ids precisa conter inteiros separados por vírgula.")
         return 1
 
-    backend = "coreclr" if have_coreclr() else "mono"
+    backend = "mono"
     print(f"[INFO] Backend preferido: {backend}")
     if backend == "mono":
         print("[INFO] DOTNET_ROOT não encontrado — usando Mono com spawn e import tardio.")

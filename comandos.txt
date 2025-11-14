@@ -2,3 +2,4 @@ bash shell/reset_ros_env.sh
 rosrun rqt_graph rqt_graph 
 rosrun airspace_control control_panel.py
 rosrun airspace_control test_vant_ros.py --ids 0,1,2
+python3 scripts/main.py --nvant 3

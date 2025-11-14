@@ -46,26 +46,91 @@ class GenericVANTModel:
             H.add_edge(u, v, key=0, **(d or {}))
             H.add_edge(v, u, key=0, **(d or {}))
         return H
+
     @classmethod
-    def carregar_posicoes(cls, caminho_arquivo: str) -> Dict[str, Tuple[float, float]]:
-        posicoes: Dict[str, Tuple[float, float]] = {}
+    def carregar_posicoes(cls, caminho_arquivo: str) -> Dict[str, Tuple[str, Tuple[float, float]]]:
+        # --- Parâmetros do Stage (BASEADOS NO SEU .world) ---
+        STAGE_WIDTH = 200.0    # ← CORRIGIDO: baseado no size[200.000 ...]
+        STAGE_HEIGHT = 66.0    # ← CORRIGIDO: baseado no size[... 66.000]
+        # ----------------------------------------------------
+
+        # Primeiro, ler o arquivo para encontrar os valores mínimos e máximos
+        x_values = []
+        y_values = []
+        nodes_data = []
+        
         with open(caminho_arquivo, "r", encoding="utf-8") as f:
             _ = f.readline()  # cabeçalho
             for linha in f:
                 linha = linha.strip()
                 if not linha:
                     continue
+                
                 partes = linha.split(",", 3)
                 if len(partes) < 3:
                     continue
+                
                 label = partes[1].strip()
                 posicao_raw = partes[2].strip()
+                
                 m = cls._COORD_RE.match(posicao_raw) or cls._COORD_RE.search(linha)
                 if not m:
-                    raise ValueError(f"Não foi possível extrair coordenadas de: {linha}")
-                x = float(m.group(1)); y = float(m.group(2))
-                posicoes[label] = (x, y)
+                    continue
+                    
+                x_do_grafo = float(m.group(1))
+                y_do_grafo = float(m.group(2))
+                
+                x_values.append(x_do_grafo)
+                y_values.append(y_do_grafo)
+                nodes_data.append((label, x_do_grafo, y_do_grafo))
+
+        # Calcular os limites do grafo
+        if not x_values:  # Se não há dados, retornar vazio
+            return {}
+        
+        min_x, max_x = min(x_values), max(x_values)
+        min_y, max_y = min(y_values), max(y_values)
+        
+        # Calcular fatores de escala automáticos
+        graph_width = max_x - min_x
+        graph_height = max_y - min_y
+        
+        # Evitar divisão por zero
+        if graph_width == 0:
+            scale_x = 1.0
+        else:
+            scale_x = STAGE_WIDTH / graph_width
+        
+        if graph_height == 0:
+            scale_y = 1.0
+        else:
+            scale_y = STAGE_HEIGHT / graph_height
+        
+        print(f"[DEBUG] Grafo: largura={graph_width:.2f}, altura={graph_height:.2f}")
+        print(f"[DEBUG] Stage: largura={STAGE_WIDTH}, altura={STAGE_HEIGHT}")
+        print(f"[DEBUG] Escalas: scale_x={scale_x:.4f}, scale_y={scale_y:.4f}")
+
+        # Agora processar os nós com as escalas calculadas
+        posicoes: Dict[str, Tuple[str, Tuple[float, float]]] = {}
+        
+        for label, x_do_grafo, y_do_grafo in nodes_data:
+            # Aplicar conversão de escala automática
+            converted_x = (x_do_grafo - min_x) * scale_x
+            converted_y = (y_do_grafo - min_y) * scale_y
+            
+            # APLICAÇÃO DA INVERSÃO DE Y PARA PERSPECTIVA DO STAGE
+            y_stage = STAGE_HEIGHT - converted_y  
+            x_stage  =  converted_x # Correção crucial
+            
+            print(f"[DEBUG] {label}: ({x_do_grafo}, {y_do_grafo}) -> ({x_stage:.1f}, {y_stage:.1f})")
+            
+            # Armazenar no formato (label, (x, y))
+            posicoes[label] = (label, (x_stage, y_stage))
+        
         return posicoes
+
+
+
     # ----------------------------- Construtor -----------------------------
     def __init__(self, grafo_txt: str, init_node: str):
         G_in, _ = carregar_grafo_txt(grafo_txt)
@@ -277,6 +342,8 @@ class VANTInstance:
         self.obj_vant = obj_vant
         self.enable_ros = bool(enable_ros)
         self.name = node_name or f"supervisor_vant_{self.id}"
+        self.posicoes=model.posicao_evento
+
 
         # 1) Recupera (ou calcula) supervisor genérico
         if supervisor_mono is None:
@@ -317,7 +384,7 @@ class VANTInstance:
         if self.enable_ros:
             import rospy
             from std_msgs.msg import String
-            rospy.init_node(self.name, anonymous=False)
+            self.ros=rospy.init_node(self.name, anonymous=False)
             self.pub_state  = rospy.Publisher(f"/{self.name}/state", String, queue_size=10, latch=True)
             self.pub_events = rospy.Publisher(f"/{self.name}/possible_events", String, queue_size=10, latch=True)
             self.pub_marked = rospy.Publisher(f"/{self.name}/is_marked", String, queue_size=10, latch=True)
