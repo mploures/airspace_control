@@ -85,54 +85,98 @@ def get_nodes_bbox(nodes):
         return None
     return min(xs), min(ys), max(xs), max(ys)
 
-
-def align_grafo_to_bitmap(nodes, W_img, H_img, out_path=None, force=False):
+def align_grafo_to_bitmap(nodes, W_img, H_img, bitmap_img, out_path=None, force=False):
     """
-    Alinha o grafo a um bitmap recortado aplicando transformação afim simples:
-      x' = (x - minx) * sx
-      y' = (y - miny) * sy
-    Onde (minx,miny) é o offset do bbox dos nós e sx,sy são escalas para casar
-    o bbox com as dimensões do bitmap. Casos:
-      - Se o bbox ~ (W_img,H_img): aplica só OFFSET (sx=sy=1).
-      - Se ratios W_img/w_nodes e H_img/h_nodes ~ iguais: aplica ESCALA UNIFORME.
-      - Caso contrário, aplica ESCALA ANISOTRÓPICA (sx!=sy).
+    CORREÇÃO COMPLETA: Alinha o grafo ao bitmap mantendo as posições relativas corretas
+    e garantindo que os VERTIPORTS fiquem em pixels brancos.
     """
     bbox = get_nodes_bbox(nodes)
     if not bbox:
         return nodes, (0, 0), (1.0, 1.0), None
 
     minx, miny, maxx, maxy = bbox
-    w_nodes = maxx - minx + 1
-    h_nodes = maxy - miny + 1
+    w_nodes = maxx - minx
+    h_nodes = maxy - miny
 
-    tol_w = max(8, int(0.02 * W_img))
-    tol_h = max(8, int(0.02 * H_img))
+    print(f"[DEBUG] BBox grafo original: minx={minx}, miny={miny}, maxx={maxx}, maxy={maxy}")
+    print(f"[DEBUG] Dimensões grafo: {w_nodes}x{h_nodes}")
+    print(f"[DEBUG] Dimensões imagem: {W_img}x{H_img}")
 
-    rx = W_img / max(1, w_nodes)
-    ry = H_img / max(1, h_nodes)
 
-    same_size = (abs(w_nodes - W_img) <= tol_w) and (abs(h_nodes - H_img) <= tol_h)
-    nearly_uniform = abs(rx - ry) <= 0.01
+    if bitmap_img is None:
+        raise RuntimeError("Não foi possível carregar o bitmap para verificação de alinhamento")
 
-    sx = sy = 1.0
-    # OBS: mesmo que force=True, se não for "same_size", iremos escalar.
-    if same_size:
-        sx = sy = 1.0
-    elif nearly_uniform:
-        sx = sy = (rx + ry) * 0.5
-    else:
-        sx, sy = rx, ry
+    # Encontrar a região do bitmap que contém o grafo (pixels brancos)
+    white_pixels = np.where(bitmap_img == 255)
+    if len(white_pixels[0]) == 0:
+        raise RuntimeError("Bitmap não contém pixels brancos (caminhos)")
+
+    white_minx, white_maxx = np.min(white_pixels[1]), np.max(white_pixels[1])
+    white_miny, white_maxy = np.min(white_pixels[0]), np.max(white_pixels[0])
+    white_width = white_maxx - white_minx
+    white_height = white_maxy - white_miny
+
+    print(f"[DEBUG] Região branca no bitmap: ({white_minx},{white_miny}) a ({white_maxx},{white_maxy})")
+    print(f"[DEBUG] Dimensões região branca: {white_width}x{white_height}")
+
+    # Calcular escalas para mapear o grafo para a região branca do bitmap
+    scale_x = white_width / w_nodes if w_nodes > 0 else 1.0
+    scale_y = white_height / h_nodes if h_nodes > 0 else 1.0
+    
+    # Usar escala uniforme para manter proporções
+    scale_uniform = min(scale_x, scale_y)
+    
+    # Calcular offset para centralizar o grafo na região branca
+    offset_x = white_minx + (white_width - w_nodes * scale_uniform) / 2
+    offset_y = white_miny + (white_height - h_nodes * scale_uniform) / 2
+
+    print(f"[DEBUG] Escalas calculadas: scale_x={scale_x:.4f}, scale_y={scale_y:.4f}")
+    print(f"[DEBUG] Escala uniforme escolhida: {scale_uniform:.4f}")
+    print(f"[DEBUG] Offsets finais: offset_x={offset_x:.2f}, offset_y={offset_y:.2f}")
 
     aligned = {}
+    vertiport_positions = []
+    
     for label, info in nodes.items():
         x, y = info['pos']
-        x2 = int(round((x - minx) * sx))
-        y2 = int(round((y - miny) * sy))
+        # Aplicar transformação completa
+        x2 = int(round((x - minx) * scale_uniform + offset_x))
+        y2 = int(round((y - miny) * scale_uniform + offset_y))
+        
+        # Garantir que está dentro dos limites
+        x2 = max(0, min(x2, W_img - 1))
+        y2 = max(0, min(y2, H_img - 1))
+        
         aligned[label] = {
             'tipo': info.get('tipo', ''),
             'pos': (x2, y2),
             'conns': list(info.get('conns', []))
         }
+        
+        # Verificar se é VERTIPORT e se está em pixel branco
+        if info.get('tipo', '').upper() == 'VERTIPORT':
+            pixel_val = bitmap_img[y2, x2] if (0 <= x2 < W_img and 0 <= y2 < H_img) else -1
+            print(f"[DEBUG] VERTIPORT {label} em ({x2},{y2}) - pixel: {pixel_val}")
+            vertiport_positions.append((label, x2, y2, pixel_val))
+
+    # Verificar e corrigir VERTIPORTS que não estão em pixels brancos
+    for label, x, y, pixel_val in vertiport_positions:
+        if pixel_val != 255:
+            print(f"[WARN] VERTIPORT {label} não está em pixel branco. Corrigindo...")
+            # Buscar pixel branco mais próximo
+            found = False
+            for radius in range(1, 50):  # Buscar em raio de 50 pixels
+                for angle in range(0, 360, 10):  # Buscar em círculo
+                    rad = math.radians(angle)
+                    nx = int(round(x + radius * math.cos(rad)))
+                    ny = int(round(y + radius * math.sin(rad)))
+                    if 0 <= nx < W_img and 0 <= ny < H_img and bitmap_img[ny, nx] == 255:
+                        aligned[label]['pos'] = (nx, ny)
+                        print(f"[INFO] VERTIPORT {label} movido para ({nx},{ny})")
+                        found = True
+                        break
+                if found:
+                    break
 
     out_written = None
     if out_path:
@@ -142,18 +186,17 @@ def align_grafo_to_bitmap(nodes, W_img, H_img, out_path=None, force=False):
         except Exception as e:
             print(f"[WARN] Não consegui escrever grafo alinhado em {out_path}: {e}")
 
-    print(f"[INFO] Alinhamento do grafo ao bitmap:"
-          f" offset=({minx},{miny})  bbox=({w_nodes}x{h_nodes})"
-          f" img=({W_img}x{H_img})  ratios=(rx={rx:.4f}, ry={ry:.4f})"
-          f" -> escalas aplicadas (sx={sx:.4f}, sy={sy:.4f})")
-    return aligned, (minx, miny), (sx, sy), out_written
-
+    print(f"[INFO] Alinhamento do grafo ao bitmap COMPLETO:"
+          f" offset_grafo=({minx},{miny})  bbox_grafo=({w_nodes}x{h_nodes})"
+          f" img=({W_img}x{H_img})  escala_uniforme={scale_uniform:.4f}")
+    
+    return aligned, (minx, miny), (scale_uniform, scale_uniform), out_written
 
 def get_deposit_points_from_grafo(nodes):
     """
     Coleta pontos de depósito a partir do grafo.
     - Aceita DEPOSITO/DEPOSIT/DEP/DEPO (quando existem)
-    - **E também VERTIPORT** (trata como “depósito” operacional/inicial).
+    - **E também VERTIPORT** (trata como "depósito" operacional/inicial).
     """
     deps = []
     for label, info in nodes.items():
@@ -165,10 +208,9 @@ def get_deposit_points_from_grafo(nodes):
             deps.append(info['pos'])
     return deps
 
-
 def make_graph_and_wall_bitmaps(original_path, worlds_dir, W, H, border_frac=0.003):
     """
-    - Binariza: tudo que NÃO for branco -> PRETO; branco permanece.
+    - Binariza INVERTIDO: tudo que NÃO for branco -> BRANCO; branco -> PRETO.
     - Gera 'muro': imagem só com retângulo de borda em PRETO.
     Retorna: (graph_bw_name, muro_name, abs_graph_path, abs_muro_path)
     """
@@ -193,20 +235,22 @@ def make_graph_and_wall_bitmaps(original_path, worlds_dir, W, H, border_frac=0.0
         else:
             mask_nonwhite = ((b < 250) | (g < 250) | (r < 250))
 
-    graph = np.full((H, W), 255, dtype=np.uint8)
-    graph[mask_nonwhite] = 0
+    # **ALTERAÇÃO AQUI**: Invertendo as cores
+    # Agora: fundo PRETO (0) e o que era preto vira BRANCO (255)
+    graph = np.full((H, W), 0, dtype=np.uint8)  # Fundo preto
+    graph[mask_nonwhite] = 255  # O que não era branco vira branco
     cv2.imwrite(graph_bw_path, graph)
 
+    # Muro permanece igual: bordas pretas sobre fundo branco
     th = max(1, int(round(max(W, H) * border_frac)))
-    muro = np.full((H, W), 255, dtype=np.uint8)
-    muro[:th, :] = 0
-    muro[-th:, :] = 0
-    muro[:, :th] = 0
-    muro[:, -th:] = 0
+    muro = np.full((H, W), 255, dtype=np.uint8)  # Fundo branco
+    muro[:th, :] = 0      # Borda superior preta
+    muro[-th:, :] = 0     # Borda inferior preta  
+    muro[:, :th] = 0      # Borda esquerda preta
+    muro[:, -th:] = 0     # Borda direita preta
     cv2.imwrite(muro_path, muro)
 
     return graph_bw_name, muro_name, graph_bw_path, muro_path
-
 
 def compute_scale(W, H, max_wh):
     if max_wh is None or max_wh <= 0:
@@ -298,7 +342,7 @@ def color_for(i): return PALETTE[i % len(PALETTE)]
 
 
 # -----------------------------
-# Ângulos “bons” (entre arestas)
+# Ângulos "bons" (entre arestas)
 # -----------------------------
 def gap_angles_from_segments(center, corners, need):
     x0, y0 = center
@@ -446,10 +490,10 @@ floorplan
   name "graph_low"
   bitmap "{bitmap_graph_low}"
   color "black"
-  size [{W_px:.3f} {H_px:.3f} {low_height:.3f}]
+  size [{W_px:.3f} {H_px:.3f} {2*wall_height:.3f}]
   pose [{W_px/2:.3f} {H_px/2:.3f} 0.0 0.0]
-  obstacle_return 0
-  laser_return 0
+  obstacle_return 1
+  laser_return 1
 )
 
 # --- camada alta: MURO (real/opcional) ---
@@ -458,7 +502,7 @@ floorplan
   name "muro_high"
   bitmap "{bitmap_muro_high}"
   color "black"
-  size [{wall_W:.3f} {wall_H:.3f} {wall_height:.3f}]
+  size [{wall_W:.3f} {wall_H:.3f} {3*wall_height:.3f}]
   pose [{W_px/2:.3f} {H_px/2:.3f} 0.0 0.0]
   obstacle_return {1 if collide_walls else 0}
   laser_return {1 if sense_walls else 0}
@@ -625,24 +669,35 @@ def main():
         bitmap_target, worlds_dir, W, H, border_frac=0.003
     )
 
-    # 5) Lê e ALINHA o grafo ao bitmap (migração padronizada de TODAS as posições)
+    # 4.5) Carregar o bitmap binarizado para uso no alinhamento
+    graph_bw_img = cv2.imread(graph_bw_path, cv2.IMREAD_GRAYSCALE)
+    if graph_bw_img is None:
+        raise RuntimeError("Não foi possível carregar o bitmap binarizado")
+
+    # 5) Lê e ALINHA o grafo ao bitmap
     nodes = None
     offset_used  = (0, 0)
     scales_used  = (1.0, 1.0)
     grafo_out_path = None
     if grafo_path:
         nodes_in = read_grafo_txt(grafo_path)
-        # NÃO forçar offset-only; deixa escalar quando necessário
         force_align = False
         out_norm_path = os.path.join(os.path.dirname(grafo_path), 'grafo_recortado.txt')
         nodes_aligned, offset_used, scales_used, grafo_out_path = align_grafo_to_bitmap(
-            nodes_in, W_img=W, H_img=H, out_path=out_norm_path, force=force_align
+            nodes_in, W_img=W, H_img=H,bitmap_img=graph_bw_img, out_path=out_norm_path, force=force_align
         )
         nodes = nodes_aligned
     else:
         nodes = None
 
-    # 6) Posições: exatamente os "depósitos" (VERTIPORT quando não houver DEPOSITO).
+    # 6) Calcula escala e redimensiona ANTES do posicionamento
+    s = compute_scale(W, H, args.max_wh)
+    graph_name_used, W_used, H_used = downscale_with_scale(graph_bw_path, worlds_dir, W, H, s)
+    muro_name_used,  W2,     H2     = downscale_with_scale(muro_path,     worlds_dir, W, H, s)
+    assert (W_used, H_used) == (W2, H2), "downscale inconsistente entre grafo e muro"
+
+    # 7) Posições: exatamente os "depósitos" (VERTIPORT quando não houver DEPOSITO).
+    #    Agora usando o bitmap REDIMENSIONADO para verificação
     
     placed_px = []
     if nodes:
@@ -650,9 +705,25 @@ def main():
         if not deposits:
             print("[WARN] grafo.txt sem depósitos/VERTIPORT identificados; nada a posicionar.")
         else:
-            if len(deposits) < args.nvants:
-                print(f"[WARN] Só {len(deposits)} pontos-base para {args.nvants} VANTs. "
-                      f"Distribuindo ciclicamente os VANTs ao redor dos mesmos pontos.")
+            # Carregar o bitmap graph_bw REDIMENSIONADO para verificação de pixels brancos
+            graph_bw_used_path = os.path.join(worlds_dir, graph_name_used)
+            graph_bw_img = cv2.imread(graph_bw_used_path, cv2.IMREAD_GRAYSCALE)
+            if graph_bw_img is None:
+                raise RuntimeError("Não foi possível carregar o bitmap graph_bw redimensionado para verificação de pixels.")
+
+            # Redimensionar os depósitos para o novo tamanho
+            deposits_resized = []
+            for (x, y) in deposits:
+                x_resized = int(round(x * s))
+                y_resized = int(round(y * s))
+                deposits_resized.append((x_resized, y_resized))
+            
+            deposits = deposits_resized
+
+            # DEBUG: Mostrar informações sobre os depósitos encontrados
+            print(f"[DEBUG] Encontrados {len(deposits)} depósitos/vertiports (REDIMENSIONADOS):")
+            for i, (cx, cy) in enumerate(deposits):
+                print(f"  Depósito {i}: ({cx}, {cy})")
 
             n_vants = args.nvants
             n_ports = len(deposits)
@@ -667,56 +738,130 @@ def main():
             safety_margin = args.sep_px
             min_sep = robot_d + safety_margin
 
+            def is_valid_position(x, y, placed_positions, safety_radius=3):
+                """Verifica se a posição é válida: pixel branco + sem obstáculos próximos + distância de outros VANTs"""
+                # Verifica se está dentro dos limites da imagem REDIMENSIONADA
+                if not (0 <= x < W_used and 0 <= y < H_used):
+                    return False
+                
+                # Verifica se o pixel é branco (caminho válido)
+                if graph_bw_img[y, x] != 255:  # Branco no bitmap invertido
+                    return False
+                
+                # Verifica se há pixels pretos (obstáculos) na vizinhança imediata
+                for dx in range(-safety_radius, safety_radius + 1):
+                    for dy in range(-safety_radius, safety_radius + 1):
+                        nx, ny = x + dx, y + dy
+                        if 0 <= nx < W_used and 0 <= ny < H_used:
+                            if graph_bw_img[ny, nx] == 0:  # Pixel preto (obstáculo)
+                                return False
+                
+                # Verifica distância mínima de outros VANTs
+                for (px, py) in placed_positions:
+                    if math.hypot(px - x, py - y) < min_sep:
+                        return False
+                
+                return True
+
+            def find_valid_positions_near_point(cx, cy, count, max_radius=30):
+                """Encontra múltiplas posições válidas próximas ao ponto (cx, cy)"""
+                valid_positions = []
+                
+                # Primeiro verifica a posição exata
+                if is_valid_position(cx, cy, placed_px):
+                    valid_positions.append((cx, cy))
+                    if len(valid_positions) >= count:
+                        return valid_positions
+                
+                # Busca em círculos concêntricos
+                for radius in range(1, max_radius + 1):
+                    # Gera pontos no círculo atual
+                    num_points = max(12, radius * 8)
+                    for i in range(num_points):
+                        angle = 2 * math.pi * i / num_points
+                        x = int(round(cx + radius * math.cos(angle)))
+                        y = int(round(cy + radius * math.sin(angle)))
+                        
+                        if is_valid_position(x, y, placed_px + valid_positions):
+                            valid_positions.append((x, y))
+                            if len(valid_positions) >= count:
+                                return valid_positions
+                
+                return valid_positions
+
+            # Para cada vertiport, posiciona os VANTs atribuídos
             for i, (cx, cy) in enumerate(deposits):
                 cx, cy = map(int, (cx, cy))
                 n_here = distribution[i]
                 if n_here == 0:
                     continue
 
-                # o primeiro VANT fica exatamente sobre o ponto do VERTIPORT
-                placed_px.append((cx, cy))
+                print(f"[INFO] Posicionando {n_here} VANTs no vertiport {i} em ({cx}, {cy})")
 
-                # define raio base de afastamento em função do tamanho físico
-                radius = min_sep
-                camada = 1
+                # Verifica se a posição do vertiport é válida
+                if not is_valid_position(cx, cy, placed_px):
+                    print(f"[WARN] Vertiport {i} em ({cx}, {cy}) não está em posição válida (pixel preto ou muito próximo de obstáculo)")
+                    # Mostra o valor do pixel para debug
+                    pixel_val = graph_bw_img[cy, cx] if (0 <= cx < W_used and 0 <= cy < H_used) else -1
+                    print(f"[DEBUG] Pixel no vertiport {i}: {pixel_val} (255=branco, 0=preto)")
 
-                for j in range(1, n_here):
-                    # calcula ângulo de distribuição equilibrada (uniforme em 360°)
-                    angle = 2 * math.pi * (j - 1) / max(1, n_here - 1)
+                # Encontra posições válidas próximas ao vertiport
+                valid_positions = find_valid_positions_near_point(cx, cy, n_here)
+                
+                if len(valid_positions) < n_here:
+                    print(f"[WARN] Só encontrei {len(valid_positions)} posições válidas de {n_here} necessárias para vertiport {i}")
+                
+                # Adiciona as posições válidas encontradas
+                for pos in valid_positions:
+                    placed_px.append(pos)
+                    print(f"  - VANT posicionado em {pos}")
 
-                    # coordenadas candidatas
-                    x_new = int(round(cx + radius * math.cos(angle)))
-                    y_new = int(round(cy + radius * math.sin(angle)))
+            print(f"[INFO] Total de VANTs posicionados: {len(placed_px)}/{args.nvants}")
 
-                    # checa colisão global
-                    ok = False
-                    attempt = 0
-                    while not ok and attempt < 20:
-                        ok = True
-                        for (px, py) in placed_px:
-                            if math.hypot(px - x_new, py - y_new) < min_sep:
-                                ok = False
-                                break
-                        if not ok:
-                            # aumenta o raio e tenta novamente
-                            camada += 1
-                            radius = (robot_d + safety_margin) * camada
-                            x_new = int(round(cx + radius * math.cos(angle)))
-                            y_new = int(round(cy + radius * math.sin(angle)))
-                        attempt += 1
-
-                    placed_px.append((x_new, y_new))
-
-
+    # Fallback se não conseguiu posicionar todos os VANTs
+    if len(placed_px) < args.nvants:
+        print(f"[WARN] Não foi possível posicionar todos os VANTs. Usando fallback...")
+        missing = args.nvants - len(placed_px)
+        
+        # Tenta encontrar posições aleatórias em pixels brancos no bitmap REDIMENSIONADO
+        white_pixels = []
+        for y in range(H_used):
+            for x in range(W_used):
+                if graph_bw_img[y, x] == 255:  # Pixel branco
+                    # Verifica vizinhança sem obstáculos
+                    valid = True
+                    for dx in range(-3, 4):
+                        for dy in range(-3, 4):
+                            nx, ny = x + dx, y + dy
+                            if 0 <= nx < W_used and 0 <= ny < H_used:
+                                if graph_bw_img[ny, nx] == 0:
+                                    valid = False
+                                    break
+                        if not valid:
+                            break
+                    if valid:
+                        white_pixels.append((x, y))
+        
+        if white_pixels:
+            random.shuffle(white_pixels)
+            for i in range(min(missing, len(white_pixels))):
+                pos = white_pixels[i]
+                if is_valid_position(pos[0], pos[1], placed_px):
+                    placed_px.append(pos)
+                    print(f"  - VANT adicional posicionado em {pos}")
 
     if not placed_px:
-        # fallback (sem pontos-base)
+        # fallback (sem pontos-base) usando o bitmap REDIMENSIONADO
         sep = max(1, int(args.sep_px))
         vports = []
         if nodes:
             for label, info in nodes.items():
                 if (info.get('tipo', '') or '').upper() == 'VERTIPORT':
-                    center = info['pos']
+                    # Redimensionar a posição do vertiport
+                    x, y = info['pos']
+                    x_resized = int(round(x * s))
+                    y_resized = int(round(y * s))
+                    center = (x_resized, y_resized)
                     vports.append({'label': label, 'center': center, 'corners': []})
         if not vports:
             if not points_path:
@@ -724,7 +869,9 @@ def main():
             pts = read_points_txt(points_path)
             if not pts:
                 raise RuntimeError(f"Arquivo de pontos vazio: {points_path}")
-            vports = [{'label': f'VP_{i}', 'center': p, 'corners': []} for i, p in enumerate(pts)]
+            # Redimensionar os pontos
+            pts_resized = [(int(round(x * s)), int(round(y * s))) for (x, y) in pts]
+            vports = [{'label': f'VP_{i}', 'center': p, 'corners': []} for i, p in enumerate(pts_resized)]
 
         M = len(vports)
         q, r = divmod(args.nvants, M)
@@ -752,7 +899,7 @@ def main():
                         theta = next(angle_iters[i])
                     cand = candidate_for_angle(
                         center=vp['center'], corners=vp['corners'],
-                        theta=theta, sep=sep, W=W, H=H, global_pts=placed_px,
+                        theta=theta, sep=sep, W=W_used, H=H_used, global_pts=placed_px,
                         r_min=r_min, step_r=step_r, max_push=4000)
                     tries += 1
                     if cand is None:
@@ -771,17 +918,8 @@ def main():
                         vports[k]['center'], vports[k]['corners'],
                         targets[k] - assigned[k] + 2)
 
-    # 7) Downscale PAREADO (mesmo 'scale' para grafo e muro)
-    s = compute_scale(W, H, args.max_wh)
-    graph_name_used, W_used, H_used = downscale_with_scale(graph_bw_path, worlds_dir, W, H, s)
-    muro_name_used,  W2,     H2     = downscale_with_scale(muro_path,     worlds_dir, W, H, s)
-    assert (W_used, H_used) == (W2, H2), "downscale inconsistente entre grafo e muro"
-
-    # 8) Ajuste das poses para o tamanho usado (apenas inverte Y)
-    if s != 1.0:
-        robot_poses_m = [to_stage_xy(x * s, y * s, W_used, H_used) for (x, y) in placed_px]
-    else:
-        robot_poses_m = [to_stage_xy(x, y, W_used, H_used) for (x, y) in placed_px]
+    # 8) Ajuste das poses para o Stage (apenas inverte Y) - já estão no tamanho correto
+    robot_poses_m = [to_stage_xy(x, y, W_used, H_used) for (x, y) in placed_px]
 
     z = 1.0  # altitude absoluta do robô no Stage
     robot_yaws = compute_spawn_yaws(robot_poses_m, W_used, H_used, mode="radial", min_sep_deg=12.0)

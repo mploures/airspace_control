@@ -376,13 +376,13 @@ def desenhar_grafo_mapa(imagem_path, ret, grafo, output_path, raio=8):
             seen.add(e)
             p1 = adj(grafo[u]["posicao"])
             p2 = adj(grafo[v]["posicao"])
-            cv2.line(img, p1, p2, (0, 0, 0), 5)
+            cv2.line(img, p1, p2, (0, 0, 0), 20)
 
     # nós
     for nid, info in grafo.items():
         x, y = adj(info["posicao"])
         cor = cores[info["tipo"]]
-        cv2.circle(img, (int(x), int(y)), raio, cor, -1)
+        cv2.circle(img, (int(x), int(y)), 3*raio, cor, -1)
 
 
     if output_path:
