@@ -448,7 +448,7 @@ define topurg ranger
 
   # o que o sensor enxerga
   sensor(
-    range [ 0.01 2.0 ]
+    range [ 0.01 5.0 ]
     fov 360
     samples 360
     obstacle_return 1
@@ -626,7 +626,13 @@ def smart_find_assets(pkg_dir, grafo_arg, bitmap_arg):
 # -----------------------------
 # MAIN
 # -----------------------------
-
+def salvar_dimensoes_reais(worlds_dir, W_used, H_used):
+    """Salva as dimensões reais usadas para referência futura"""
+    dim_path = os.path.join(worlds_dir, 'dimensoes_reais.txt')
+    with open(dim_path, 'w') as f:
+        f.write(f"STAGE_WIDTH={W_used}\n")
+        f.write(f"STAGE_HEIGHT={H_used}\n")
+    print(f"[INFO] Dimensões reais salvas: {W_used} x {H_used}")
 
 def main():
     ap = argparse.ArgumentParser()
@@ -696,6 +702,7 @@ def main():
     muro_name_used,  W2,     H2     = downscale_with_scale(muro_path,     worlds_dir, W, H, s)
     assert (W_used, H_used) == (W2, H2), "downscale inconsistente entre grafo e muro"
 
+    salvar_dimensoes_reais(worlds_dir, W_used, H_used)
     # 7) Posições: exatamente os "depósitos" (VERTIPORT quando não houver DEPOSITO).
     #    Agora usando o bitmap REDIMENSIONADO para verificação
     

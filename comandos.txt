@@ -3,3 +3,4 @@ rosrun rqt_graph rqt_graph
 rosrun airspace_control control_panel.py
 rosrun airspace_control test_vant_ros.py --ids 0,1,2
 python3 scripts/main.py --nvant 3
+scripts/v2_create_map_and_launch_stage.sh 3 3 400

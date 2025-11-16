@@ -135,7 +135,6 @@ def _cb_event_with_move(inst, vant):
     return callback
 
 
-
 def resolve_grafo_path(rel="graph/sistema_logistico/grafo_recortado.txt"):
     try:
         rp = rospkg.RosPack()
@@ -158,6 +157,7 @@ def resolve_grafo_path(rel="graph/sistema_logistico/grafo_recortado.txt"):
         return p3
     print("[ERRO] Não foi possível localizar o grafo.")
     return os.path.join(base2, rel)
+
 
 def run_vant_instance(vant_id: int, grafo_path: str, init_node: str, backend: str):
     """
@@ -214,17 +214,6 @@ def run_vant_instance(vant_id: int, grafo_path: str, init_node: str, backend: st
             enable_ros=True,
             node_name=f"supervisor_vant_{vant_id}"
         )
-
-        # DEBUG: Verificar mapeamento de coordenadas
-        print(f"[VANT {vant_id}] === DEBUG: Mapeamento de coordenadas ===")
-        print(f"[VANT {vant_id}] Posições carregadas (primeiros 5):")
-        for key, value in list(model.posicoes.items())[:5]:
-            print(f"  Nó '{key}' -> {value}")
-        
-        print(f"[VANT {vant_id}] Eventos mapeados para coordenadas (primeiros 10):")
-        for key, value in list(inst.posicoes.items())[:10]:
-            print(f"  Evento '{key}' -> {value}")
-        print(f"[VANT {vant_id}] === FIM DEBUG ===")
 
         vant_fisico = VANT(f"vant_{vant_id}", rospy)
 
