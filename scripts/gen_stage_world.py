@@ -87,8 +87,8 @@ def get_nodes_bbox(nodes):
 
 def align_grafo_to_bitmap(nodes, W_img, H_img, bitmap_img, out_path=None, force=False):
     """
-    CORREÇÃO COMPLETA: Alinha o grafo ao bitmap mantendo as posições relativas corretas
-    e garantindo que os VERTIPORTS fiquem em pixels brancos.
+    CORREÇÃO: Alinha o grafo ao bitmap mantendo as posições relativas corretas
+    e garantindo compatibilidade com a função carregar_posicoes
     """
     bbox = get_nodes_bbox(nodes)
     if not bbox:
@@ -101,7 +101,6 @@ def align_grafo_to_bitmap(nodes, W_img, H_img, bitmap_img, out_path=None, force=
     print(f"[DEBUG] BBox grafo original: minx={minx}, miny={miny}, maxx={maxx}, maxy={maxy}")
     print(f"[DEBUG] Dimensões grafo: {w_nodes}x{h_nodes}")
     print(f"[DEBUG] Dimensões imagem: {W_img}x{H_img}")
-
 
     if bitmap_img is None:
         raise RuntimeError("Não foi possível carregar o bitmap para verificação de alinhamento")
@@ -119,14 +118,14 @@ def align_grafo_to_bitmap(nodes, W_img, H_img, bitmap_img, out_path=None, force=
     print(f"[DEBUG] Região branca no bitmap: ({white_minx},{white_miny}) a ({white_maxx},{white_maxy})")
     print(f"[DEBUG] Dimensões região branca: {white_width}x{white_height}")
 
-    # Calcular escalas para mapear o grafo para a região branca do bitmap
+    # **CORREÇÃO: Usar escala uniforme baseada na menor dimensão**
     scale_x = white_width / w_nodes if w_nodes > 0 else 1.0
     scale_y = white_height / h_nodes if h_nodes > 0 else 1.0
     
-    # Usar escala uniforme para manter proporções
-    scale_uniform = min(scale_x, scale_y)
+    # Usar escala uniforme para manter proporções (95% para margem)
+    scale_uniform = min(scale_x, scale_y) * 0.95
     
-    # Calcular offset para centralizar o grafo na região branca
+    # **CORREÇÃO: Calcular offset para centralizar corretamente**
     offset_x = white_minx + (white_width - w_nodes * scale_uniform) / 2
     offset_y = white_miny + (white_height - h_nodes * scale_uniform) / 2
 
@@ -139,7 +138,7 @@ def align_grafo_to_bitmap(nodes, W_img, H_img, bitmap_img, out_path=None, force=
     
     for label, info in nodes.items():
         x, y = info['pos']
-        # Aplicar transformação completa
+        # **CORREÇÃO: Aplicar transformação de forma consistente**
         x2 = int(round((x - minx) * scale_uniform + offset_x))
         y2 = int(round((y - miny) * scale_uniform + offset_y))
         
@@ -153,10 +152,10 @@ def align_grafo_to_bitmap(nodes, W_img, H_img, bitmap_img, out_path=None, force=
             'conns': list(info.get('conns', []))
         }
         
-        # Verificar se é VERTIPORT e se está em pixel branco
+        # Verificar se é VERTIPORT
         if info.get('tipo', '').upper() == 'VERTIPORT':
             pixel_val = bitmap_img[y2, x2] if (0 <= x2 < W_img and 0 <= y2 < H_img) else -1
-            print(f"[DEBUG] VERTIPORT {label} em ({x2},{y2}) - pixel: {pixel_val}")
+            print(f"[DEBUG] VERTIPORT {label} em ({x},{y}) -> ({x2},{y2}) - pixel: {pixel_val}")
             vertiport_positions.append((label, x2, y2, pixel_val))
 
     # Verificar e corrigir VERTIPORTS que não estão em pixels brancos
@@ -165,14 +164,14 @@ def align_grafo_to_bitmap(nodes, W_img, H_img, bitmap_img, out_path=None, force=
             print(f"[WARN] VERTIPORT {label} não está em pixel branco. Corrigindo...")
             # Buscar pixel branco mais próximo
             found = False
-            for radius in range(1, 50):  # Buscar em raio de 50 pixels
-                for angle in range(0, 360, 10):  # Buscar em círculo
+            for radius in range(1, 50):
+                for angle in range(0, 360, 10):
                     rad = math.radians(angle)
                     nx = int(round(x + radius * math.cos(rad)))
                     ny = int(round(y + radius * math.sin(rad)))
                     if 0 <= nx < W_img and 0 <= ny < H_img and bitmap_img[ny, nx] == 255:
                         aligned[label]['pos'] = (nx, ny)
-                        print(f"[INFO] VERTIPORT {label} movido para ({nx},{ny})")
+                        print(f"[INFO] VERTIPORT {label} movido de ({x},{y}) para ({nx},{ny})")
                         found = True
                         break
                 if found:
@@ -186,9 +185,7 @@ def align_grafo_to_bitmap(nodes, W_img, H_img, bitmap_img, out_path=None, force=
         except Exception as e:
             print(f"[WARN] Não consegui escrever grafo alinhado em {out_path}: {e}")
 
-    print(f"[INFO] Alinhamento do grafo ao bitmap COMPLETO:"
-          f" offset_grafo=({minx},{miny})  bbox_grafo=({w_nodes}x{h_nodes})"
-          f" img=({W_img}x{H_img})  escala_uniforme={scale_uniform:.4f}")
+    print(f"[INFO] Alinhamento do grafo ao bitmap COMPLETO")
     
     return aligned, (minx, miny), (scale_uniform, scale_uniform), out_written
 
@@ -495,18 +492,6 @@ floorplan
   obstacle_return 1
   laser_return 1
 )
-
-# --- camada alta: MURO (real/opcional) ---
-floorplan
-(
-  name "muro_high"
-  bitmap "{bitmap_muro_high}"
-  color "black"
-  size [{wall_W:.3f} {wall_H:.3f} {3*wall_height:.3f}]
-  pose [{W_px/2:.3f} {H_px/2:.3f} 0.0 0.0]
-  obstacle_return {1 if collide_walls else 0}
-  laser_return {1 if sense_walls else 0}
-)
 '''
     body = []
     for i, (x, y) in enumerate(robot_poses_m):
@@ -626,13 +611,16 @@ def smart_find_assets(pkg_dir, grafo_arg, bitmap_arg):
 # -----------------------------
 # MAIN
 # -----------------------------
-def salvar_dimensoes_reais(worlds_dir, W_used, H_used):
+def salvar_dimensoes_reais(worlds_dir, W_used, H_used, W_original, H_original, scale_factor):
     """Salva as dimensões reais usadas para referência futura"""
     dim_path = os.path.join(worlds_dir, 'dimensoes_reais.txt')
     with open(dim_path, 'w') as f:
         f.write(f"STAGE_WIDTH={W_used}\n")
         f.write(f"STAGE_HEIGHT={H_used}\n")
-    print(f"[INFO] Dimensões reais salvas: {W_used} x {H_used}")
+        f.write(f"ORIGINAL_WIDTH={W_original}\n")
+        f.write(f"ORIGINAL_HEIGHT={H_original}\n")
+        f.write(f"SCALE_FACTOR={scale_factor}\n")
+    print(f"[INFO] Dimensões reais salvas: Stage={W_used}x{H_used}, Original={W_original}x{H_original}, Scale={scale_factor}")
 
 def main():
     ap = argparse.ArgumentParser()
@@ -702,7 +690,7 @@ def main():
     muro_name_used,  W2,     H2     = downscale_with_scale(muro_path,     worlds_dir, W, H, s)
     assert (W_used, H_used) == (W2, H2), "downscale inconsistente entre grafo e muro"
 
-    salvar_dimensoes_reais(worlds_dir, W_used, H_used)
+    salvar_dimensoes_reais(worlds_dir, W_used, H_used, W, H, s)
     # 7) Posições: exatamente os "depósitos" (VERTIPORT quando não houver DEPOSITO).
     #    Agora usando o bitmap REDIMENSIONADO para verificação
     

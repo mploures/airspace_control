@@ -23,6 +23,137 @@ from ultrades.automata import *
 import rospy
 from std_msgs.msg import String
 
+import os
+import re
+
+# Regex para extrair coordenadas
+_COORD_RE = re.compile(r'\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\)')
+
+def carregar_dimensoes_reais():
+    """Carrega as dimensões reais do último mundo gerado - VERSÃO ATUALIZADA"""
+    diretorios_busca = [
+        "./worlds/dimensoes_reais.txt",
+        "../worlds/dimensoes_reais.txt", 
+        os.path.expanduser("~/catkin_ws/src/airspace_control/worlds/dimensoes_reais.txt"),
+        "dimensoes_reais.txt"
+    ]
+    
+    for dim_path in diretorios_busca:
+        path_expandido = os.path.expanduser(dim_path)
+        if os.path.exists(path_expandido):
+            try:
+                with open(path_expandido, 'r') as f:
+                    lines = f.readlines()
+                    # Inicializar com valores padrão
+                    dimensoes = {
+                        'STAGE_WIDTH': 200.0,
+                        'STAGE_HEIGHT': 66.0,
+                        'ORIGINAL_WIDTH': 1239.0,
+                        'ORIGINAL_HEIGHT': 409.0,
+                        'SCALE_FACTOR': 0.323
+                    }
+                    
+                    for line in lines:
+                        line = line.strip()
+                        if '=' in line:
+                            key, value = line.split('=')
+                            key = key.strip()
+                            value = value.strip()
+                            if key in dimensoes:
+                                dimensoes[key] = float(value)
+                    
+                print(f"[INFO] Dimensões carregadas de {path_expandido}:")
+                print(f"       Stage: {dimensoes['STAGE_WIDTH']} x {dimensoes['STAGE_HEIGHT']}")
+                print(f"       Original: {dimensoes['ORIGINAL_WIDTH']} x {dimensoes['ORIGINAL_HEIGHT']}")
+                print(f"       Escala: {dimensoes['SCALE_FACTOR']}")
+                
+                return dimensoes
+            except Exception as e:
+                print(f"[ERRO] Falha ao ler {path_expandido}: {e}")
+                continue
+    
+    print("[WARN] Não encontrou dimensoes_reais.txt, usando padrão 200x66")
+    return {
+        'STAGE_WIDTH': 200.0,
+        'STAGE_HEIGHT': 66.0,
+        'ORIGINAL_WIDTH': 1239.0,
+        'ORIGINAL_HEIGHT': 409.0,
+        'SCALE_FACTOR': 0.323
+    }
+
+def carregar_posicoes(caminho_arquivo: str):
+    """Função CORRIGIDA - usa a mesma lógica de transformação do gerador de mundos"""
+    
+    # Carregar dimensões do stage
+    dimensoes = carregar_dimensoes_reais()
+    STAGE_WIDTH = dimensoes['STAGE_WIDTH']
+    STAGE_HEIGHT = dimensoes['STAGE_HEIGHT']
+    ORIGINAL_WIDTH = dimensoes['ORIGINAL_WIDTH']
+    ORIGINAL_HEIGHT = dimensoes['ORIGINAL_HEIGHT']
+    SCALE_FACTOR = dimensoes['SCALE_FACTOR']
+
+    if not os.path.exists(caminho_arquivo):
+        print(f"[ERRO] Arquivo de grafo não encontrado: {caminho_arquivo}")
+        return {}
+    
+    # Ler arquivo de grafo
+    nodes_data = []
+    
+    with open(caminho_arquivo, "r", encoding="utf-8") as f:
+        _ = f.readline()  # cabeçalho
+        for linha in f:
+            linha = linha.strip()
+            if not linha:
+                continue
+            
+            partes = linha.split(",", 3)
+            if len(partes) < 3:
+                continue
+            
+            label = partes[1].strip()
+            posicao_raw = partes[2].strip()
+            
+            m = _COORD_RE.match(posicao_raw) or _COORD_RE.search(linha)
+            if not m:
+                continue
+                
+            x_do_grafo = float(m.group(1))
+            y_do_grafo = float(m.group(2))
+            
+            nodes_data.append((label, x_do_grafo, y_do_grafo))
+
+    if not nodes_data:
+        print("[ERRO] Nenhuma coordenada válida encontrada no arquivo")
+        return {}
+
+    print(f"[DEBUG] Transformação de coordenadas:")
+    print(f"  - Dimensões Stage: {STAGE_WIDTH} x {STAGE_HEIGHT}")
+    print(f"  - Dimensões Original: {ORIGINAL_WIDTH} x {ORIGINAL_HEIGHT}") 
+    print(f"  - Fator de Escala: {SCALE_FACTOR}")
+
+    posicoes = {}
+    
+    for label, x_do_grafo, y_do_grafo in nodes_data:
+        # **TRANSFORMAÇÃO CONSISTENTE**: A mesma usada no gerador de mundos
+        # 1. Escalar para o Stage usando o mesmo fator
+        x_stage = x_do_grafo * SCALE_FACTOR
+        y_stage = y_do_grafo * SCALE_FACTOR
+        
+        # 2. **INVERSÃO DO Y** para o Stage (origem no canto inferior esquerdo)
+        y_stage_final = STAGE_HEIGHT - y_stage
+        
+        # 3. Garantir que está dentro dos limites
+        x_stage_final = max(0, min(x_stage, STAGE_WIDTH))
+        y_stage_final = max(0, min(y_stage_final, STAGE_HEIGHT))
+        
+        #print(f"[DEBUG] {label}: ({x_do_grafo}, {y_do_grafo}) -> ({x_stage_final:.1f}, {y_stage_final:.1f})")
+        
+        posicoes[label] = (label, (x_stage_final, y_stage_final))
+    
+    print(f"[INFO] Carregadas {len(posicoes)} posições do grafo")
+    
+    return posicoes
+
 # =================================================================================================
 # Classe 1: Modelo genérico (sem sufixo em eventos/estados)
 # =================================================================================================
@@ -32,12 +163,13 @@ class GenericVANTModel:
     Constrói plantas e especificações e permite calcular/salvar supervisores uma única vez.
     """
     
-    # ... (CÓDIGO EXISTENTE DA GenericVANTModel PERMANECE IGUAL) ...
     # ----------------------------- Utilitários internos -----------------------------
     _COORD_RE = re.compile(r"\(\s*([+-]?\d+(?:\.\d+)?)\s*,\s*([+-]?\d+(?:\.\d+)?)\s*\)")
+    
     @staticmethod
     def _tipo_norm(x: Any) -> str:
         return str(x).strip().upper()
+    
     @staticmethod
     def _to_multidigraph_dirigido(G_undirected: nx.Graph) -> nx.MultiDiGraph:
         H = nx.MultiDiGraph()
@@ -47,97 +179,13 @@ class GenericVANTModel:
             H.add_edge(v, u, key=0, **(d or {}))
         return H
 
-    @classmethod
-    def carregar_posicoes(cls, caminho_arquivo: str) -> Dict[str, Tuple[str, Tuple[float, float]]]:
-        # --- Parâmetros do Stage (BASEADOS NO SEU .world) ---
-        STAGE_WIDTH = 200.0    # ← CORRIGIDO: baseado no size[200.000 ...]
-        STAGE_HEIGHT = 66.0    # ← CORRIGIDO: baseado no size[... 66.000]
-        # ----------------------------------------------------
-
-        # Primeiro, ler o arquivo para encontrar os valores mínimos e máximos
-        x_values = []
-        y_values = []
-        nodes_data = []
-        
-        with open(caminho_arquivo, "r", encoding="utf-8") as f:
-            _ = f.readline()  # cabeçalho
-            for linha in f:
-                linha = linha.strip()
-                if not linha:
-                    continue
-                
-                partes = linha.split(",", 3)
-                if len(partes) < 3:
-                    continue
-                
-                label = partes[1].strip()
-                posicao_raw = partes[2].strip()
-                
-                m = cls._COORD_RE.match(posicao_raw) or cls._COORD_RE.search(linha)
-                if not m:
-                    continue
-                    
-                x_do_grafo = float(m.group(1))
-                y_do_grafo = float(m.group(2))
-                
-                x_values.append(x_do_grafo)
-                y_values.append(y_do_grafo)
-                nodes_data.append((label, x_do_grafo, y_do_grafo))
-
-        # Calcular os limites do grafo
-        if not x_values:  # Se não há dados, retornar vazio
-            return {}
-        
-        min_x, max_x = min(x_values), max(x_values)
-        min_y, max_y = min(y_values), max(y_values)
-        
-        # Calcular fatores de escala automáticos
-        graph_width = max_x - min_x
-        graph_height = max_y - min_y
-        
-        # Evitar divisão por zero
-        if graph_width == 0:
-            scale_x = 1.0
-        else:
-            scale_x = STAGE_WIDTH / graph_width
-        
-        if graph_height == 0:
-            scale_y = 1.0
-        else:
-            scale_y = STAGE_HEIGHT / graph_height
-        
-        print(f"[DEBUG] Grafo: largura={graph_width:.2f}, altura={graph_height:.2f}")
-        print(f"[DEBUG] Stage: largura={STAGE_WIDTH}, altura={STAGE_HEIGHT}")
-        print(f"[DEBUG] Escalas: scale_x={scale_x:.4f}, scale_y={scale_y:.4f}")
-
-        # Agora processar os nós com as escalas calculadas
-        posicoes: Dict[str, Tuple[str, Tuple[float, float]]] = {}
-        
-        for label, x_do_grafo, y_do_grafo in nodes_data:
-            # Aplicar conversão de escala automática
-            converted_x = (x_do_grafo - min_x) * scale_x
-            converted_y = (y_do_grafo - min_y) * scale_y
-            
-            # APLICAÇÃO DA INVERSÃO DE Y PARA PERSPECTIVA DO STAGE
-            y_stage = STAGE_HEIGHT - converted_y  
-            x_stage  =  converted_x # Correção crucial
-            
-            print(f"[DEBUG] {label}: ({x_do_grafo}, {y_do_grafo}) -> ({x_stage:.1f}, {y_stage:.1f})")
-            
-            # Armazenar no formato (label, (x, y))
-            posicoes[label] = (label, (x_stage, y_stage))
-        
-        return posicoes
-
-
-
     # ----------------------------- Construtor -----------------------------
     def __init__(self, grafo_txt: str, init_node: str):
         G_in, _ = carregar_grafo_txt(grafo_txt)
         self.G: nx.MultiDiGraph = self._to_multidigraph_dirigido(G_in)
         self.init_node: str = init_node
         self.grafo_txt: str = grafo_txt
-        self.posicoes: Dict[str, Tuple[float, float]] = self.carregar_posicoes(grafo_txt)
+        self.posicoes: Dict[str, Tuple[float, float]] = carregar_posicoes(grafo_txt)
         self.posicao_evento: Dict[str, Tuple[Any, Tuple[float, float]]] = {}
         self.dict_aresta_eventos: Dict[Tuple[Tuple[str, str], Any], Tuple[Any, Any, Any, Any]] = {}
         self.state_vertices: Dict[Any, Any] = {}
@@ -145,17 +193,213 @@ class GenericVANTModel:
         self.plantas: List[Any] = []
         self.specs: List[Any] = []
         self.Dicionario_Automatos: Dict[str, Any] = {}
+        self.custos_estado_atomico: Dict[str, Tuple[float, float, float]] = {} # (E, Tf, D)
+        
+        # Construir todos os autômatos
         self._automato_movimento()
         self._automatos_arestas()
         self._automato_modos()
         self._modelos_suporte()
+        self._automato_trabalho()
         self._automato_mapa()
         self._automato_bateria_movimento()
         self._automatos_localizacao_tarefas()
-        self.supervisor_mono: Optional[Any] = None
+        
+        # Inicializar custos APÓS construir todos os autômatos
+        self._inicializar_custos_estados()
+        self.supervisor_mono=None
+        self.supervisor_mono=self.compute_monolithic_supervisor()
+        self.dicionario_custos_supervisor=self.criar_dicionario_custo_supervisor()
+
+    # ------------------------- Métodos de Cálculo de Distância e Custos -------------------------
+    def _calcular_distancia_entre_nos(self, no1: str, no2: str) -> float:
+        """Calcula a distância real entre dois nós baseado nas posições do stage"""
+        if no1 in self.posicoes and no2 in self.posicoes:
+            _, (x1, y1) = self.posicoes[no1]
+            _, (x2, y2) = self.posicoes[no2]
+            return ((x2 - x1)**2 + (y2 - y1)**2)**0.5
+        return 1.0  # distância padrão se não encontrar posições
+
+    def _obter_tempo_voo_aresta(self, u: str, v: str) -> float:
+        """Calcula tempo de voo baseado na distância real entre nós"""
+        distancia = self._calcular_distancia_entre_nos(u, v)
+        velocidade_media = 2.0  # m/s - ajuste conforme seu sistema
+        return distancia / velocidade_media
+
+    def _obter_consumo_energia_aresta(self, u: str, v: str) -> float:
+        """Calcula consumo de energia baseado na distância real - RETORNA CUSTO POSITIVO"""
+        distancia = self._calcular_distancia_entre_nos(u, v)
+        consumo_por_metro = 0.1  # ajuste conforme seu sistema
+        return distancia * consumo_por_metro  # POSITIVO pois é custo
+
+    def _inicializar_custos_estados(self):
+        """Inicializa custos W = [E, Tf, D] considerando aspectos reais do mundo"""
+        
+        # 1. Primeiro inicializa todos os estados com zero
+        todos_estados = set()
+        for nome_automato, automato in self.Dicionario_Automatos.items():
+            for estado in states(automato):
+                estado_str = str(estado)
+                self.custos_estado_atomico[estado_str] = (0.0, 0.0, 0.0)
+        
+        # 2. CUSTOS BASEADOS EM MOVIMENTO E ARESTAS
+        # Para cada estado que representa movimento entre nós específicos
+        for u, v, k, data in self.G.edges(keys=True, data=True):
+            chave = (tuple(sorted((u, v))), k)
+            pega_uv, pega_vu, libera_uv, libera_vu = self.dict_aresta_eventos[chave]
+            tempo_voo = self._obter_tempo_voo_aresta(u, v)
+            consumo_energia = self._obter_consumo_energia_aresta(u, v)
+            
+            # Estados de ocupação da aresta (quando o UAV está trafegando)
+            estado_ocupado_uv = f"ocupado_{u}{v}"
+            estado_ocupado_vu = f"ocupado_{v}{u}"
+            
+            if estado_ocupado_uv in self.custos_estado_atomico:
+                self.custos_estado_atomico[estado_ocupado_uv] = (
+                    consumo_energia,  # E: CUSTO positivo (gasto energético)
+                    tempo_voo,        # Tf: CUSTO positivo (tempo gasto)  
+                    0.0               # D: sem progresso na missão durante movimento puro
+                )
+            
+            if estado_ocupado_vu in self.custos_estado_atomico:
+                self.custos_estado_atomico[estado_ocupado_vu] = (
+                    consumo_energia,  # E: CUSTO positivo
+                    tempo_voo,        # Tf: CUSTO positivo
+                    0.0               # D
+                )
+        
+        # 3. CUSTOS BASEADOS EM LOCALIZAÇÃO (NÓS)
+        for nome_no in self.G.nodes():
+            tipo_no = self._tipo_norm(self.G.nodes[nome_no].get("tipo", ""))
+            
+            # Estado de estar dentro de um nó (após liberar)
+            estado_dentro = f"dentro_{nome_no}"
+            
+            if estado_dentro in self.custos_estado_atomico:
+                if tipo_no == "ESTACAO":
+                    # Em estação: INCENTIVO negativo (ganho de energia)
+                    self.custos_estado_atomico[estado_dentro] = (
+                        -0.5,   # E: INCENTIVO negativo (ganho de energia)
+                        0.0,    # Tf: sem tempo de voo
+                        0.0     # D: sem progresso direto
+                    )
+                elif tipo_no == "FORNECEDOR":
+                    # No fornecedor: CUSTO energético, INCENTIVO de progresso
+                    self.custos_estado_atomico[estado_dentro] = (
+                        0.2,    # E: CUSTO positivo (consumo operacional)
+                        0.0,    # Tf
+                        -0.8    # D: INCENTIVO negativo (progresso ao coletar)
+                    )
+                elif tipo_no == "CLIENTE":
+                    # No cliente: CUSTO energético, maior INCENTIVO de progresso
+                    self.custos_estado_atomico[estado_dentro] = (
+                        0.2,    # E: CUSTO positivo
+                        0.0,    # Tf  
+                        -1.5    # D: INCENTIVO negativo (maior progresso ao entregar)
+                    )
+                elif tipo_no == "VERTIPORT":
+                    # Vertiport: INCENTIVO energético
+                    self.custos_estado_atomico[estado_dentro] = (
+                        -0.3,   # E: INCENTIVO negativo
+                        0.0,    # Tf
+                        0.0     # D
+                    )
+        
+        # 4. CUSTOS PARA ESTADOS DE TRABALHO ATIVO
+        for nome_no in self.G.nodes():
+            tipo_no = self._tipo_norm(self.G.nodes[nome_no].get("tipo", ""))
+            
+            if tipo_no in {"FORNECEDOR", "CLIENTE"}:
+                estado_trabalhando = f"trabalhando_{nome_no}"
+                if estado_trabalhando in self.custos_estado_atomico:
+                    # Durante trabalho ativo: CUSTO energético, INCENTIVO de progresso
+                    self.custos_estado_atomico[estado_trabalhando] = (
+                        0.3,    # E: CUSTO positivo (consumo durante operação)
+                        0.0,    # Tf
+                        -1.2    # D: INCENTIVO negativo (progresso ativo na missão)
+                    )
+        
+        # 5. CUSTOS PARA ESTADOS DE BATERIA
+        estado_bat_baixa = "bat_baixa"
+        if estado_bat_baixa in self.custos_estado_atomico:
+            # Bateria baixa: ALTOS CUSTOS (penalidades)
+            self.custos_estado_atomico[estado_bat_baixa] = (
+                1.0,    # E: ALTO CUSTO (ineficiência)
+                0.5,    # Tf: CUSTO de tempo
+                0.5     # D: CUSTO (falta de progresso)
+            )
+        
+        # 6. CUSTOS PARA ESTADO DE MOVIMENTO GENÉRICO
+        estado_movendo = "Movendo"
+        if estado_movendo in self.custos_estado_atomico:
+            # Estado genérico de movimento: CUSTO base
+            self.custos_estado_atomico[estado_movendo] = (
+                0.1,    # E: CUSTO positivo (consumo base)
+                0.1,    # Tf: CUSTO positivo (tempo base)
+                0.0     # D: sem progresso
+            )
+        
+        # 7. CUSTOS PARA WORKFLOW
+        for estado in ["pick", "place"]:
+            if estado in self.custos_estado_atomico:
+                if estado == "pick":
+                    self.custos_estado_atomico[estado] = (0.0, 0.0, -0.5)  # INCENTIVO ao pegar
+                else:  # place
+                    self.custos_estado_atomico[estado] = (0.0, 0.0, -1.0)  # Maior INCENTIVO ao entregar
+
+    def obter_custo_estado_supervisor(self, estado_supervisor) -> Tuple[float, float, float]:
+        """Calcula custo W = [E, Tf, D] para um estado do supervisor somando estados componentes"""
+        E_total, Tf_total, D_total = 0.0, 0.0, 0.0
+        
+        # O estado do supervisor é uma tupla de estados atômicos
+        for estado_componente in estado_supervisor.split('|'):
+            estado_str = str(estado_componente)
+            if estado_str in self.custos_estado_atomico:
+                E, Tf, D = self.custos_estado_atomico[estado_str]
+                E_total += E
+                Tf_total += Tf
+                D_total += D
+        
+        return (E_total, Tf_total, D_total)
+   
+    def criar_dicionario_custo_supervisor(self) -> Dict[str, Tuple[float, float, float]]:
+        """
+        Gera um dicionário mapeando cada estado do supervisor ao seu custo total W=[E, Tf, D].
+        Deve ser chamado APÓS compute_monolithic_supervisor().
+        """
+        if self.supervisor_mono is None:
+            raise ValueError(
+                "O supervisor monolítico não foi calculado. "
+                "Chame 'compute_monolithic_supervisor()' primeiro."
+                )
+
+        custos_supervisor: Dict[str, Tuple[float, float, float]] = {}
+                
+        for estado_supervisor in states(self.supervisor_mono):
+        
+            custo_combinado = self.obter_custo_estado_supervisor(str(estado_supervisor))
+                    
+            custos_supervisor[str(estado_supervisor)] = custo_combinado
+                    
+        print(f"[INFO] Dicionário de custos criado para {len(custos_supervisor)} estados do supervisor.")
+        
+        return custos_supervisor
+        
+    def atualizar_parametros_custo(self, 
+                                   consumo_por_metro: float = None,
+                                   velocidade_media: float = None,
+                                   ganho_carregamento: float = None):
+        """Atualiza parâmetros e recalcula custos"""
+        # Aqui você pode adicionar lógica para atualizar parâmetros
+        # e chamar _inicializar_custos_estados() novamente se necessário
+        if any(param is not None for param in [consumo_por_metro, velocidade_media, ganho_carregamento]):
+            print("[INFO] Parâmetros de custo atualizados - recalculando...")
+            self._inicializar_custos_estados()
+
     # ------------------------- Acesso rápido -------------------------
     def ev(self, nome: str) -> Any:
         return self.eventos[nome]
+    
     # ------------------------- Geração do Alfabeto (sem _{id}) -------------------------
     def _gerar_alfabeto_generico(self) -> Dict[str, Any]:
         G = self.G
@@ -194,6 +438,7 @@ class GenericVANTModel:
             if nome not in eventos:
                 eventos[nome] = event(nome, controllable=ctrl)
         return eventos
+    
     # --------------------------------- Plantas ---------------------------------
     def _automato_movimento(self):
         Parado = state("Parado", marked=True); Movendo = state("Movendo")
@@ -211,6 +456,7 @@ class GenericVANTModel:
         A = dfa(trs, Parado, "movimento")
         self.Dicionario_Automatos["movimento"] = A
         self.specs.append(A)
+    
     def _automatos_arestas(self):
         vistos = set()
         for u, v, k, data in self.G.edges(keys=True, data=True):
@@ -225,6 +471,7 @@ class GenericVANTModel:
             self.plantas.extend([A1, A2])
             self.Dicionario_Automatos[f"aresta_{u}{v}_{k}"] = A1
             self.Dicionario_Automatos[f"aresta_{v}{u}_{k}"] = A2
+    
     def _automato_modos(self):
         geral = state("geral", marked=True); trs = []
         for n in self.G.nodes():
@@ -242,6 +489,7 @@ class GenericVANTModel:
         A = dfa(trs, geral, "modos")
         self.Dicionario_Automatos["modos"] = A
         self.plantas.append(A)
+    
     def _modelos_suporte(self):
         s_com = state("com_ok", marked=True)
         Acom = dfa([
@@ -257,6 +505,7 @@ class GenericVANTModel:
         Abat = dfa([(s_bat, self.ev("bateria_baixa"), s_bat)], s_bat, "bateria")
         self.Dicionario_Automatos["bateria"] = Abat
         self.plantas.append(Abat)
+    
     def _automato_mapa(self):
         initial = None
         for n in self.G.nodes():
@@ -273,6 +522,7 @@ class GenericVANTModel:
         A = dfa(trs, initial, "Mapa")
         self.Dicionario_Automatos["mapa"] = A
         self.specs.append(A)
+    
     def _automato_bateria_movimento(self):
         s_norm = state("bat_normal", marked=True); s_low  = state("bat_baixa")
         e_low  = self.ev("bateria_baixa")
@@ -285,6 +535,7 @@ class GenericVANTModel:
         A = dfa(trs, s_norm, "MovimentoBateria")
         self.Dicionario_Automatos["bat_mov"] = accessible(A)
         self.specs.append(self.Dicionario_Automatos["bat_mov"])
+    
     def _automatos_localizacao_tarefas(self):
         for n in self.G.nodes():
             tipo = self._tipo_norm(self.G.nodes[n].get("tipo", ""))
@@ -302,19 +553,30 @@ class GenericVANTModel:
             A = dfa(trs, s_out, f"loc_{n}")
             self.Dicionario_Automatos[f"loc_{n}"] = A
             self.specs.append(A)
+   
+    def _automato_trabalho(self):
+        s_pick= state("pick", marked=True)
+        s_place  = state("place", marked=True)
+        
+        trs = []
+        for n in self.G.nodes():
+            tipo = self._tipo_norm(self.G.nodes[n].get("tipo", ""))
+            if tipo in {"FORNECEDOR"}: 
+                trs.append((s_pick, self.ev(f"comeca_trabalho_{n}"), s_place))
+            if tipo in {"CLIENTE"}: 
+                trs.append((s_place, self.ev(f"comeca_trabalho_{n}"), s_pick))
+        
+        A = dfa(trs, s_pick, f"work_flow_{n}")
+        self.Dicionario_Automatos[f"work_flow_{n}"] = A
+        self.specs.append(A)
+
     # ------------------------------- Supervisor / IO -------------------------------
     def compute_monolithic_supervisor(self, force: bool = False) -> Any:
         if self.supervisor_mono is None or force:
             self.supervisor_mono = monolithic_supervisor(self.plantas, self.specs)
         return self.supervisor_mono
-    def save_wmod(self, path: str):
-        write_wmod(self.plantas, self.specs, path)
-    def save_supervisor_xml(self, path: str, ensure_supervisor: bool = True):
-        if ensure_supervisor and self.supervisor_mono is None:
-            self.compute_monolithic_supervisor()
-        if self.supervisor_mono is None:
-            raise RuntimeError("Supervisor não disponível.")
-        write_xml(self.supervisor_mono, path)
+
+
 
 # =================================================================================================
 # Classe 2: Instância por VANT — modo lógico (sem ROS) por padrão

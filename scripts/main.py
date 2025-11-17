@@ -59,8 +59,8 @@ def _cb_event_with_move(inst, vant):
                     label, coordinates = coord_entry
                     original_x, original_y = coordinates
 
-                    print(f"[DEBUG] pos_entry: {pos_entry}")
-                    print(f"[DEBUG] event_obj: {event_obj}")
+                    #print(f"[DEBUG] pos_entry: {pos_entry}")
+                    #print(f"[DEBUG] event_obj: {event_obj}")
                     print(f"[DEBUG] label: {label}, x: {original_x}, y: {original_y}")
 
                     if not isinstance(original_x, (int, float)) or not isinstance(original_y, (int, float)):
