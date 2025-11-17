@@ -555,18 +555,23 @@ class GenericVANTModel:
             self.specs.append(A)
    
     def _automato_trabalho(self):
-        s_pick= state("pick", marked=True)
-        s_place  = state("place", marked=True)
+        s_pick   = state("pick", marked=False)
+        s_place  = state("place", marked=False)
+        s_base   = state("vantport", marked=True)
         
         trs = []
         for n in self.G.nodes():
             tipo = self._tipo_norm(self.G.nodes[n].get("tipo", ""))
             if tipo in {"FORNECEDOR"}: 
-                trs.append((s_pick, self.ev(f"comeca_trabalho_{n}"), s_place))
+                trs.append((s_base, self.ev(f"comeca_trabalho_{n}"), s_pick))
             if tipo in {"CLIENTE"}: 
-                trs.append((s_place, self.ev(f"comeca_trabalho_{n}"), s_pick))
+                trs.append((s_pick, self.ev(f"comeca_trabalho_{n}"), s_place))
+            if tipo in {"VERTIPORT"}:
+                for u, v, k, data in self.G.in_edges(n, keys=True, data=True):
+                    trs.append((s_place, self.ev(f"pega_{u}{n}"), s_base))
+
         
-        A = dfa(trs, s_pick, f"work_flow_{n}")
+        A = dfa(trs, s_base, f"work_flow_{n}")
         self.Dicionario_Automatos[f"work_flow_{n}"] = A
         self.specs.append(A)
 
