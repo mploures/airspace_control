@@ -6,6 +6,7 @@ NODES=$(rosnode list 2>/dev/null | grep -v "^/rosout$")
 if [ -z "$NODES" ]; then
   echo "✅ No active ROS nodes found (except /rosout)."
 else
+  pkill -9 rosmaster
   for NODE in $NODES; do
     echo "⛔ Terminating node: $NODE"
     rosnode kill "$NODE" 2>/dev/null
