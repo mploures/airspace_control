@@ -167,6 +167,10 @@ class VANT:
         # Publishers
         self.pub_cmd_sim = self.ros_node.Publisher(cmd_sim_topic, Twist, queue_size=10)
         self.pub_event_out = self.ros_node.Publisher("/event", String, queue_size=10)
+        cmd_log_topic = cmd_candidates[-1]  # tópico lógico, ex: /vant_0/cmd_vel
+        self.pub_cmd_logical = self.ros_node.Publisher(cmd_log_topic, Twist, queue_size=10)
+        self.pub_path = self.ros_node.Publisher(f"{ns_logical}/path", Path, queue_size=10)
+        
 
 
         # Subscribers
