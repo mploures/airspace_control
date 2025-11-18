@@ -5,8 +5,9 @@
 # Imports (Python, Grafo, UltraDES)
 # =================================================================================================
 from typing import Dict, Tuple, List, Any, Iterable, Optional
-import os, sys, re
+import os, sys, re, time, math, random, threading
 import networkx as nx
+from collections import defaultdict, deque
 
 # --- Caminho p/ achar graph/ ao executar via ROS ou direto ---
 _pkg_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
@@ -16,9 +17,10 @@ if _pkg_root not in sys.path:
 from airspace_core.uav_agent import VANT
 from graph.gerar_grafo import carregar_grafo_txt  
 from ultrades.automata import *
+from airspace_core.milp_des import otimizador 
 
 # =================================================================================================
-# ### NOVOS IMPORTS - Lógica do Nó ROS ###
+# ### Lógica do Nó ROS ###
 # =================================================================================================
 import rospy
 from std_msgs.msg import String
@@ -194,7 +196,7 @@ class GenericVANTModel:
         self.specs: List[Any] = []
         self.Dicionario_Automatos: Dict[str, Any] = {}
         self.custos_estado_atomico: Dict[str, Tuple[float, float, float]] = {} # (E, Tf, D)
-        
+        self.CUSTO_TEMPO_D = 10
         # Construir todos os autômatos
         self._automato_movimento()
         self._automatos_arestas()
@@ -204,6 +206,7 @@ class GenericVANTModel:
         self._automato_mapa()
         self._automato_bateria_movimento()
         self._automatos_localizacao_tarefas()
+        self._automato_tarefa_completa()
         
         # Inicializar custos APÓS construir todos os autômatos
         self._inicializar_custos_estados()
@@ -233,119 +236,166 @@ class GenericVANTModel:
         return distancia * consumo_por_metro  # POSITIVO pois é custo
 
     def _inicializar_custos_estados(self):
-        """Inicializa custos W = [E, Tf, D] considerando aspectos reais do mundo"""
+        """
+        Inicializa custos W = [E, Tf, D] com base em uma filosofia de "custo de oportunidade".
         
-        # 1. Primeiro inicializa todos os estados com zero
-        todos_estados = set()
+        Dimensões:
+        - E (Energia):   Positivo = Custo; Negativo = Incentivo (Carregar)
+        - Tf (Tempo):    Positivo = Custo (Duração)
+        - D (Progresso): Positivo = Custo (Penalidade de Tempo); Negativo = Incentivo (Missão)
+        """
+        
+        # ==================================================================
+        # 1. CONSTANTES DE CUSTO (Ajuste estes valores para calibrar)
+        # ==================================================================
+        
+        # (D) Penalidade base por passo de tempo. Isso torna a inatividade custosa.
+        CUSTO_TEMPO_D = 0.5 
+        
+        # (E) Custo de energia para movimento (além do custo da aresta)
+        CUSTO_MOVIMENTO_E = 0.2
+        
+        # (E) Custo de energia para operar (hovering em nós de trabalho)
+        CUSTO_OPERACIONAL_E = 0.1
+        
+        # (E) Incentivo (negativo) por estar em um nó de carregamento
+        INCENTIVO_CARGA_E = -1.0
+        
+        # (D) Incentivo (negativo) para progresso de missão
+        INCENTIVO_COLETA_D = -5.0
+        INCENTIVO_ENTREGA_D = -10.0
+        
+        # (E, D) Penalidades severas para estados indesejados
+        PENALIDADE_BATERIA_E = 10.0
+        PENALIDADE_BATERIA_D = 10.0
+
+        
+        # ==================================================================
+        # 2. INICIALIZAÇÃO: CUSTO DE OPORTUNIDADE (D)
+        # ==================================================================
+        # Todos os estados atômicos começam com um custo de progresso positivo (penalidade de tempo).
+        # Isso corrige o problema do "custo zero" para estados ociosos.
         for nome_automato, automato in self.Dicionario_Automatos.items():
             for estado in states(automato):
-                estado_str = str(estado)
-                self.custos_estado_atomico[estado_str] = (0.0, 0.0, 0.0)
+                self.custos_estado_atomico[str(estado)] = (
+                    0.0,            # E (Energia)
+                    0.0,            # Tf (Tempo Físico)
+                    CUSTO_TEMPO_D   # D (Progresso) - Penalidade de tempo
+                )
         
-        # 2. CUSTOS BASEADOS EM MOVIMENTO E ARESTAS
-        # Para cada estado que representa movimento entre nós específicos
+        # ==================================================================
+        # 3. CUSTOS DE MOVIMENTO (E, Tf)
+        # ==================================================================
+        
+        # Custo genérico de estar no estado "Movendo" (do _automato_movimento)
+        if "Movendo" in self.custos_estado_atomico:
+            self.custos_estado_atomico["Movendo"] = (
+                CUSTO_MOVIMENTO_E,  # E: Custo base de energia para se mover
+                0.1,                # Tf: Custo base de tempo
+                CUSTO_TEMPO_D       # D: Mantém a penalidade de tempo
+            )
+            
+        # Custo específico da aresta (do _automatos_arestas)
         for u, v, k, data in self.G.edges(keys=True, data=True):
             chave = (tuple(sorted((u, v))), k)
-            pega_uv, pega_vu, libera_uv, libera_vu = self.dict_aresta_eventos[chave]
+            if chave not in self.dict_aresta_eventos:
+                continue # Garante que o evento foi criado
+                
             tempo_voo = self._obter_tempo_voo_aresta(u, v)
             consumo_energia = self._obter_consumo_energia_aresta(u, v)
             
-            # Estados de ocupação da aresta (quando o UAV está trafegando)
-            estado_ocupado_uv = f"ocupado_{u}{v}"
-            estado_ocupado_vu = f"ocupado_{v}{u}"
-            
-            if estado_ocupado_uv in self.custos_estado_atomico:
-                self.custos_estado_atomico[estado_ocupado_uv] = (
-                    consumo_energia,  # E: CUSTO positivo (gasto energético)
-                    tempo_voo,        # Tf: CUSTO positivo (tempo gasto)  
-                    0.0               # D: sem progresso na missão durante movimento puro
-                )
-            
-            if estado_ocupado_vu in self.custos_estado_atomico:
-                self.custos_estado_atomico[estado_ocupado_vu] = (
-                    consumo_energia,  # E: CUSTO positivo
-                    tempo_voo,        # Tf: CUSTO positivo
-                    0.0               # D
-                )
+            for estado_ocupado in [f"ocupado_{u}{v}", f"ocupado_{v}{u}"]:
+                if estado_ocupado in self.custos_estado_atomico:
+                    # Este custo é SOMADO ao custo de "Movendo"
+                    self.custos_estado_atomico[estado_ocupado] = (
+                        consumo_energia,  # E: Custo (gasto)
+                        tempo_voo,        # Tf: Custo (duração)
+                        CUSTO_TEMPO_D     # D: Mantém a penalidade de tempo
+                    )
         
-        # 3. CUSTOS BASEADOS EM LOCALIZAÇÃO (NÓS)
+        # ==================================================================
+        # 4. CUSTOS/INCENTIVOS DE LOCALIZAÇÃO (E)
+        # ==================================================================
+        # ATENÇÃO: Usamos os estados do _automato_mapa (ex: "VERTIPORT_0")
+        # em vez de "dentro_{n}", pois os logs mostraram que o VANT
+        # pode estar no nó (mapa) mas "fora" (loc_{n}) no estado inicial.
+        
         for nome_no in self.G.nodes():
+            estado_mapa = str(nome_no) # Estado do _automato_mapa
+            if estado_mapa not in self.custos_estado_atomico:
+                continue
+                
             tipo_no = self._tipo_norm(self.G.nodes[nome_no].get("tipo", ""))
             
-            # Estado de estar dentro de um nó (após liberar)
-            estado_dentro = f"dentro_{nome_no}"
+            if tipo_no in {"ESTACAO", "VERTIPORT"}:
+                # INCENTIVO de energia por estar em local de carga
+                self.custos_estado_atomico[estado_mapa] = (
+                    INCENTIVO_CARGA_E,  # E: Incentivo (negativo)
+                    0.0,                # Tf
+                    CUSTO_TEMPO_D       # D: Mantém a penalidade de tempo
+                )
+            elif tipo_no in {"FORNECEDOR", "CLIENTE"}:
+                # CUSTO de energia por estar em local de trabalho (hovering)
+                self.custos_estado_atomico[estado_mapa] = (
+                    CUSTO_OPERACIONAL_E, # E: Custo (positivo)
+                    0.0,                 # Tf
+                    CUSTO_TEMPO_D        # D: Mantém a penalidade de tempo
+                )
+            # Nós lógicos (sem tipo) mantêm o custo (0.0 E, 0.0 Tf, 0.5 D)
+
+        # ==================================================================
+        # 5. INCENTIVOS DE PROGRESSO DE MISSÃO (D)
+        # ==================================================================
+        
+        # Estados de trabalho ativo (do _automato_modos)
+        for nome_no in self.G.nodes():
+            tipo_no = self._tipo_norm(self.G.nodes[nome_no].get("tipo", ""))
+            estado_trabalhando = f"trabalhando_{nome_no}"
             
-            if estado_dentro in self.custos_estado_atomico:
-                if tipo_no == "ESTACAO":
-                    # Em estação: INCENTIVO negativo (ganho de energia)
-                    self.custos_estado_atomico[estado_dentro] = (
-                        -0.5,   # E: INCENTIVO negativo (ganho de energia)
-                        0.0,    # Tf: sem tempo de voo
-                        0.0     # D: sem progresso direto
-                    )
-                elif tipo_no == "FORNECEDOR":
-                    # No fornecedor: CUSTO energético, INCENTIVO de progresso
-                    self.custos_estado_atomico[estado_dentro] = (
-                        0.2,    # E: CUSTO positivo (consumo operacional)
-                        0.0,    # Tf
-                        -0.8    # D: INCENTIVO negativo (progresso ao coletar)
+            if estado_trabalhando in self.custos_estado_atomico:
+                if tipo_no == "FORNECEDOR":
+                    # GRANDE INCENTIVO de progresso (D negativo)
+                    self.custos_estado_atomico[estado_trabalhando] = (
+                        CUSTO_OPERACIONAL_E,  # E: Custo de operar
+                        0.0,                  # Tf
+                        INCENTIVO_COLETA_D    # D: Incentivo (negativo)
                     )
                 elif tipo_no == "CLIENTE":
-                    # No cliente: CUSTO energético, maior INCENTIVO de progresso
-                    self.custos_estado_atomico[estado_dentro] = (
-                        0.2,    # E: CUSTO positivo
-                        0.0,    # Tf  
-                        -1.5    # D: INCENTIVO negativo (maior progresso ao entregar)
-                    )
-                elif tipo_no == "VERTIPORT":
-                    # Vertiport: INCENTIVO energético
-                    self.custos_estado_atomico[estado_dentro] = (
-                        -0.3,   # E: INCENTIVO negativo
-                        0.0,    # Tf
-                        0.0     # D
-                    )
-        
-        # 4. CUSTOS PARA ESTADOS DE TRABALHO ATIVO
-        for nome_no in self.G.nodes():
-            tipo_no = self._tipo_norm(self.G.nodes[nome_no].get("tipo", ""))
-            
-            if tipo_no in {"FORNECEDOR", "CLIENTE"}:
-                estado_trabalhando = f"trabalhando_{nome_no}"
-                if estado_trabalhando in self.custos_estado_atomico:
-                    # Durante trabalho ativo: CUSTO energético, INCENTIVO de progresso
+                    # INCENTIVO MÁXIMO de progresso (D negativo)
                     self.custos_estado_atomico[estado_trabalhando] = (
-                        0.3,    # E: CUSTO positivo (consumo durante operação)
-                        0.0,    # Tf
-                        -1.2    # D: INCENTIVO negativo (progresso ativo na missão)
+                        CUSTO_OPERACIONAL_E,  # E: Custo de operar
+                        0.0,                  # Tf
+                        INCENTIVO_ENTREGA_D   # D: Incentivo (negativo)
                     )
+
+        # Estados do Workflow (do _automato_trabalho)
+        if "pick" in self.custos_estado_atomico:
+            self.custos_estado_atomico["pick"] = (
+                0.0,                # E
+                0.0,                # Tf
+                INCENTIVO_COLETA_D  # D: Incentivo (negativo)
+            )
+        if "place" in self.custos_estado_atomico:
+            self.custos_estado_atomico["place"] = (
+                0.0,                 # E
+                0.0,                 # Tf
+                INCENTIVO_ENTREGA_D  # D: Incentivo (negativo)
+            )
+
+        # ==================================================================
+        # 6. PENALIDADES (E, D)
+        # ==================================================================
         
-        # 5. CUSTOS PARA ESTADOS DE BATERIA
+        # Estado de bateria baixa (do _automato_bateria_movimento)
         estado_bat_baixa = "bat_baixa"
         if estado_bat_baixa in self.custos_estado_atomico:
-            # Bateria baixa: ALTOS CUSTOS (penalidades)
+            # CUSTO MUITO ALTO (penalidade) em E e D
             self.custos_estado_atomico[estado_bat_baixa] = (
-                1.0,    # E: ALTO CUSTO (ineficiência)
-                0.5,    # Tf: CUSTO de tempo
-                0.5     # D: CUSTO (falta de progresso)
+                PENALIDADE_BATERIA_E,  # E: Penalidade
+                0.0,                   # Tf
+                PENALIDADE_BATERIA_D   # D: Penalidade
             )
-        
-        # 6. CUSTOS PARA ESTADO DE MOVIMENTO GENÉRICO
-        estado_movendo = "Movendo"
-        if estado_movendo in self.custos_estado_atomico:
-            # Estado genérico de movimento: CUSTO base
-            self.custos_estado_atomico[estado_movendo] = (
-                0.1,    # E: CUSTO positivo (consumo base)
-                0.1,    # Tf: CUSTO positivo (tempo base)
-                0.0     # D: sem progresso
-            )
-        
-        # 7. CUSTOS PARA WORKFLOW
-        for estado in ["pick", "place"]:
-            if estado in self.custos_estado_atomico:
-                if estado == "pick":
-                    self.custos_estado_atomico[estado] = (0.0, 0.0, -0.5)  # INCENTIVO ao pegar
-                else:  # place
-                    self.custos_estado_atomico[estado] = (0.0, 0.0, -1.0)  # Maior INCENTIVO ao entregar
+
 
     def obter_custo_estado_supervisor(self, estado_supervisor) -> Tuple[float, float, float]:
         """Calcula custo W = [E, Tf, D] para um estado do supervisor somando estados componentes"""
@@ -425,7 +475,7 @@ class GenericVANTModel:
         # 3) Carregamento (ESTACAO, VERTIPORT)
         for n in G.nodes():
             tipo = self._tipo_norm(G.nodes[n].get("tipo", ""))
-            if tipo in {"ESTACAO", "VERTIPORT"}:
+            if tipo in {"ESTACAO"}:
                 ini = f"carregar_{n}"; fim = f"fim_carregar_{n}"
                 if ini not in eventos: eventos[ini] = event(ini, controllable=True)
                 if fim not in eventos: eventos[fim] = event(fim, controllable=False)
@@ -482,7 +532,7 @@ class GenericVANTModel:
                 trs.append((geral, e_ini, s_trab)); trs.append((s_trab, e_fim, geral))
         for n in self.G.nodes():
             tipo = self._tipo_norm(self.G.nodes[n].get("tipo", ""))
-            if tipo in {"ESTACAO", "VERTIPORT"}:
+            if tipo in {"ESTACAO"}:
                 s_c = state(f"carregando_{n}")
                 e_ini = self.ev(f"carregar_{n}"); e_fim = self.ev(f"fim_carregar_{n}")
                 trs.append((geral, e_ini, s_c)); trs.append((s_c, e_fim, geral))
@@ -529,7 +579,7 @@ class GenericVANTModel:
         trs = [(s_norm, e_low, s_low), (s_low,  e_low, s_low)]
         for n in self.G.nodes():
             tipo = self._tipo_norm(self.G.nodes[n].get("tipo", ""))
-            if tipo in {"ESTACAO", "VERTIPORT"}:
+            if tipo in {"ESTACAO"}:
                 e_ini = self.ev(f"carregar_{n}")
                 trs.extend([(s_low,  e_ini, s_norm), (s_norm, e_ini, s_norm)])
         A = dfa(trs, s_norm, "MovimentoBateria")
@@ -575,6 +625,50 @@ class GenericVANTModel:
         self.Dicionario_Automatos[f"work_flow_{n}"] = A
         self.specs.append(A)
 
+    def _automato_tarefa_completa(self):
+        for n in self.G.nodes():
+            tipo = self._tipo_norm(self.G.nodes[n].get("tipo", ""))
+            
+            # Só consideramos nós que têm tarefas locais
+            if tipo not in {"FORNECEDOR", "CLIENTE", "ESTACAO", "VERTIPORT"}: 
+                continue
+
+            s_pode = state(f"pode_sair_{n}", marked=True)
+            s_trab = state(f"trabalhando_{n}")
+            trs = []
+
+            # 1. Eventos de Saída (ES)
+            # O agente pode tentar sair se estiver no estado 'pode_sair'
+            eventos_saida = [self.ev(f"pega_{n}{x}") for x in self.G.neighbors(n)]
+            for e_saida in eventos_saida:
+                trs.append((s_pode, e_saida, s_pode)) # Autolaço: permite sair
+
+            # 2. Eventos de Início e Fim de Tarefa (ET_ini e ET_fim)
+            e_ini = None; e_fim = None
+            if tipo in {"FORNECEDOR", "CLIENTE"}:
+                e_ini = self.ev(f"comeca_trabalho_{n}")
+                e_fim = self.ev(f"fim_trabalho_{n}")
+            elif tipo in {"ESTACAO"}:
+                e_ini = self.ev(f"carregar_{n}")
+                e_fim = self.ev(f"fim_carregar_{n}")
+            
+            if e_ini and e_fim:
+                # Transição: Inicia o trabalho/carregamento (Vai para o estado restritivo)
+                trs.append((s_pode, e_ini, s_trab)) 
+                
+                # Transição: Permite o autolaço do evento de início no estado de trabalho (opcional)
+                trs.append((s_trab, e_ini, s_trab)) 
+                
+                # Transição: Fim do trabalho/carregamento (Volta ao estado livre)
+                trs.append((s_trab, e_fim, s_pode))
+                
+                # A RESTRIÇÃO PRINCIPAL é a ausência de transição (s_trab, e_saida, ...)
+                # O DFA irá automaticamente restringir os eventos de saída (pega_nx) no estado s_trab.
+                
+            A = dfa(trs, s_pode, f"tarefa_completa_{n}")
+            self.Dicionario_Automatos[f"tarefa_completa_{n}"] = A
+            self.specs.append(A)
+
     # ------------------------------- Supervisor / IO -------------------------------
     def compute_monolithic_supervisor(self, force: bool = False) -> Any:
         if self.supervisor_mono is None or force:
@@ -582,18 +676,16 @@ class GenericVANTModel:
         return self.supervisor_mono
 
 
-
 # =================================================================================================
-# Classe 2: Instância por VANT — modo lógico (sem ROS) por padrão
+# Classe 2: Supervisor + Controle Inteligente por MILP 
 # =================================================================================================
-import re
-from ultrades.automata import dfa, transitions, states, initial_state, is_marked, event
-
 class VANTInstance:
     """
-    Especializa o supervisor genérico (sem sufixo) para um VANT específico (id_num),
-    renomeando eventos para '<evento>_{id}'. Em modo lógico (enable_ros=False), expõe
-    uma API mínima para teste: enabled_events(), step(event), state().
+    Especializa o supervisor genérico para um VANT específico (id_num),
+    incluindo um sistema de controle inteligente baseado em otimização MILP (Janela Deslizante).
+    
+    Esta versão garante que a otimização usa eventos com ID (vant_1) e publica no barramento 
+    ROS com eventos GENÉRICOS (vant).
     """
     _RE_SUFFIX = re.compile(r"^(.*)_(\d+)$")
 
@@ -604,24 +696,25 @@ class VANTInstance:
                  obj_vant=None,
                  enable_ros: bool = False,
                  node_name: str = None):
+        
+        # ----------------------- Inicialização Base (Supervisor DES) -----------------------
         self.model = model
         self.id = int(id_num)
         self.obj_vant = obj_vant
         self.enable_ros = bool(enable_ros)
         self.name = node_name or f"supervisor_vant_{self.id}"
-        self.posicoes=model.posicao_evento
-
+        self.posicoes = model.posicao_evento 
 
         # 1) Recupera (ou calcula) supervisor genérico
         if supervisor_mono is None:
             if getattr(model, "supervisor_mono", None) is None:
-                supervisor_mono = model.compute_monolithic_supervisor()
+                # Chama a função de cálculo se necessário
+                supervisor_mono = model.compute_monolithic_supervisor() 
             else:
                 supervisor_mono = model.supervisor_mono
         self._sup_gen = supervisor_mono
 
         # 2) Renomeia TODAS as transições do supervisor para evento_{id}
-        # MAS preservando os objetos Event originais
         trs_gen = list(transitions(self._sup_gen))
         renamed_trs = []
         self.event_map = {}      # e_gen -> e_id (string)
