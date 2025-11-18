@@ -165,10 +165,9 @@ class VANT:
         cmd_sim_topic = cmd_candidates[0]
 
         # Publishers
-        self.pub_cmd_logical = self.ros_node.Publisher(f"{ns_logical}/cmd_vel", Twist, queue_size=10)
         self.pub_cmd_sim = self.ros_node.Publisher(cmd_sim_topic, Twist, queue_size=10)
         self.pub_event_out = self.ros_node.Publisher("/event", String, queue_size=10)
-        self.pub_path = self.ros_node.Publisher(f"{ns_logical}/planned_path", Path, queue_size=10)
+
 
         # Subscribers
         self.ros_node.Subscriber(odom_topic, Odometry, self._cb_odom, queue_size=10)
