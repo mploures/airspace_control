@@ -59,7 +59,7 @@ def extract_automaton_matrices(G, k):
         onehot[event_index[e]] = True
         event_dict[str(e)] = (e, onehot)
 
-    return A, B, C, W, D, event_dict
+    return A, B, C, W, D, event_dict,state_index
 
 
 def print_automaton_data(A, B, C, W, D, event_dict):
