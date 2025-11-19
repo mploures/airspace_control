@@ -29,7 +29,7 @@ def test_utm_model():
         print(f"\n[ERRO FATAL] Falha ao inicializar UTMModel ou calcular supervisor: {e}")
         # Se a inicialização falhar, paramos o teste.
         return
-
+    
 
     # A. Propriedades do Grafo
     print(f"\n--- 🗺️ Propriedades do Grafo ---")
@@ -39,8 +39,6 @@ def test_utm_model():
     # B. Propriedades do Modelo
     print(f"\n--- ⚙️ Propriedades da Modelagem ---")
     print(f"Número de Eventos Únicos (Alfabeto): {len(utm.eventos)}")
-    for i in range(10):
-        print
     print(f"Número de Plantas (Recursos): {len(utm.plantas)}")
     print(f"Número de Especificações (Restrições UTM): {len(utm.specs)}")
 
@@ -70,6 +68,14 @@ def test_utm_model():
         
     except Exception as e:
         print(f"[ERRO] Falha ao inspecionar o supervisor: {e}")
+
+    i=0
+
+    proibidos_incial=utm.eventos_proibidos_estado[utm.agent_state[0]]
+
+    for e in proibidos_incial:
+        print(str(e))
+
 
     print("\n--- ✅ Teste Manual Concluído ---")
 

@@ -1,5 +1,5 @@
 import networkx as nx
-from typing import Dict, Any, Tuple, List
+from typing import Dict, Any, Tuple, List, Set
 import os, sys, re 
 
 # --- Caminho p/ achar graph/ ao executar via ROS ou direto ---
@@ -7,11 +7,81 @@ _pkg_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 if _pkg_root not in sys.path:
     sys.path.append(_pkg_root)
 
-
 from ultrades.automata import *
 from graph.gerar_grafo import carregar_grafo_txt  
 
+# --- Funções Auxiliares para Cálculo do Supervisor ---
 
+def pre_mapear_eventos_factíveis(automato: Any) -> Dict[State, Set[Event]]:
+    """
+    Pré-calcula e retorna um dicionário mapeando cada objeto State do autômato 
+    ao conjunto de Eventos factíveis a partir desse estado.
+    
+    ASSUME que transitions(automato) retorna uma LISTA DE TUPLAS (origem, evento, destino).
+    """
+    eventos_por_estado: Dict[State, Set[Event]] = {s: set() for s in states(automato)}
+    
+    # 1. Obtém a lista de transições (origem, evento, destino)
+    lista_transicoes = transitions(automato)
+
+    # 2. Itera sobre todas as transições e popula o dicionário
+    for origem, evento, destino in lista_transicoes:
+        # Se a origem for um estado válido (e não None), adiciona o evento ao conjunto
+        if origem in eventos_por_estado:
+            eventos_por_estado[origem].add(evento)
+            
+    return eventos_por_estado
+
+def pre_calcular_eventos_proibidos(supervisor: Any, plantas: List) -> Dict[State, Set[Event]]:
+    """
+    Calcula o conjunto de eventos proibidos (E_Plantas \ E_Supervisor) para cada estado
+    acessível do Supervisor, usando o pré-mapeamento de eventos.
+    """
+    eventos_proibidos_por_estado = {}
+    
+    # Pré-mapeamento do Supervisor: {State_Supervisor: {Eventos}}
+    mapa_eventos_supervisor = pre_mapear_eventos_factíveis(supervisor)
+    
+    # Pré-mapeamento de todas as Plantas: [ {nome_estado_str: objeto_state} ]
+    mapas_estado_plantas = [{str(s): s for s in states(planta)} for planta in plantas]
+    
+    # Pré-mapeamento de Eventos de todas as Plantas: [ {State_Planta: {Eventos}} ]
+    mapas_eventos_plantas = [pre_mapear_eventos_factíveis(planta) for planta in plantas]
+    
+    # Itera sobre todos os estados alcançáveis do supervisor
+    for estado_supervisor_atual in states(supervisor):
+        
+        estado_nome = str(estado_supervisor_atual)
+        nomes_estados_componentes = estado_nome.split('|')
+        
+        eventos_possiveis_plantas = set()
+        
+        # 1. União dos Eventos Factíveis em todas as Plantas (E_Plantas)
+        for i, nome_estado_planta in enumerate(nomes_estados_componentes):
+            
+            if i >= len(plantas):
+                break
+                
+            mapa_estado = mapas_estado_plantas[i]
+            mapa_eventos = mapas_eventos_plantas[i]
+            
+            estado_planta = mapa_estado.get(nome_estado_planta)
+            
+            if estado_planta is not None:
+                # Usa o mapa pré-calculado para obter os eventos
+                eventos_planta_i = mapa_eventos.get(estado_planta, set())
+                eventos_possiveis_plantas.update(eventos_planta_i)
+
+        # 2. Eventos Factíveis no Supervisor (E_Supervisor)
+        # Usa o mapa pré-calculado
+        eventos_permitidos_supervisor = mapa_eventos_supervisor.get(estado_supervisor_atual, set())
+            
+        # 3. Cálculo dos Eventos Proibidos (E_Proibidos = E_Plantas \ E_Supervisor)
+        eventos_proibidos = eventos_possiveis_plantas.difference(eventos_permitidos_supervisor)
+
+        eventos_proibidos_por_estado[estado_supervisor_atual] = eventos_proibidos
+
+    return eventos_proibidos_por_estado
 class UTMModel:
     """
     Modelo DES da UTM Minimalista (Monolítico Computável)
@@ -33,12 +103,12 @@ class UTMModel:
         return self.eventos[nome]
 
     # ----------------------------- Construtor -----------------------------
-    def __init__(self, grafo_txt: str, init_node: str):
+    def __init__(self, grafo_txt: str, init_node: str, num_agent=1):
         G_in, _ = carregar_grafo_txt(grafo_txt)
         self.G: nx.MultiDiGraph = self._to_multidigraph_dirigido(G_in)
         self.init_node: str = init_node
         self.grafo_txt: str = grafo_txt
-        
+        self.num_agent=num_agent
         self.dict_aresta_eventos: Dict[Tuple[Tuple[str, str], Any], Tuple[Any, Any, Any, Any]] = {}
         self.state_vertices: Dict[Any, Any] = {}
         
@@ -51,14 +121,17 @@ class UTMModel:
         self.supervisor_mono = None
         
         self._automatos_arestas()
-        self._automato_mapa()
+        #self._automato_mapa()
         self._automato_movimento()
         self._automatos_vertice_bloqueio()
         self._automatos_arestas_sentido()
         #self._automatos_vertice_mutex()
-
         
         self.supervisor_mono = self.compute_monolithic_supervisor()
+
+        self.agent_state=[initial_state(self.supervisor_mono) for i in range(self.num_agent)]
+
+        self.eventos_proibidos_estado=pre_calcular_eventos_proibidos(self.supervisor_mono, self.plantas)
 
     # ------------------------- Geração do Alfabeto Minimalista -------------------------
     def _gerar_alfabeto_utm(self) -> Dict[str, Any]:
@@ -104,9 +177,7 @@ class UTMModel:
         self._eventos_utm = eventos
         return eventos
 
-
     # ------------------------- Modelo -------------------------
-
     def _automatos_vertice_bloqueio(self):
         """
         Plantas triviais: para cada vértice v, um autômato 1-estado que
@@ -157,12 +228,12 @@ class UTMModel:
                 self.dict_aresta_eventos[chave] = (pega_uv, pega_vu, libera_uv, libera_vu)
             trs.extend([
                 (Parado, pega_uv, Movendo), (Movendo, libera_uv, Parado),
-                #(Movendo1, pega_uv, Movendo2), (Movendo2, libera_uv, Movendo1),
+                #(Movendo, pega_uv, Movendo2), (Movendo2, libera_uv, Movendo),
                 #(Movendo2, pega_uv, Movendo3), (Movendo3, libera_uv, Movendo2),
 
 
                 (Parado, pega_vu, Movendo), (Movendo, libera_vu, Parado),
-                #(Movendo1, pega_vu, Movendo2), (Movendo2, libera_vu, Movendo1),
+                #(Movendo, pega_vu, Movendo2), (Movendo2, libera_vu, Movendo),
                 #(Movendo2, pega_vu, Movendo3), (Movendo3, libera_vu, Movendo2),
             ])
         A = dfa(trs, Parado, "movimento")

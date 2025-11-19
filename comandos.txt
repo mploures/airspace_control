@@ -10,7 +10,7 @@ python3 src/airspace_core/utm_testbench.py
 rostopic pub /tarefas std_msgs/String "data: 'FORNECEDOR_0,CLIENTE_1'"
 
 # Publicar outra tarefa
-rostopic pub /tarefas std_msgs/String "data: 'FORNECEDOR_1,CLIENTE_1'"
+rostopic pub /tarefas std_msgs/String "data: 'FORNECEDOR_0,CLIENTE_0'"
 
 # Publicar tarefa vazia para cancelar/resetar
 rostopic pub /tarefas std_msgs/String "data: ''"
