@@ -216,203 +216,360 @@ class GenericVANTModel:
         self.dicionario_custos_supervisor=self.criar_dicionario_custo_supervisor()
 
     # ------------------------- Métodos de Cálculo de Distância e Custos -------------------------
+
+    def _extrair_coordenadas_no(self, no: str):
+        """
+        Tenta extrair (x, y) de self.posicoes[no] de forma robusta.
+
+        Aceita formatos:
+        - posicoes[no] = (x, y)
+        - posicoes[no] = (algo, (x, y))
+        - se não conseguir interpretar, retorna None.
+        """
+        if not hasattr(self, "posicoes") or no not in self.posicoes:
+            return None
+
+        val = self.posicoes[no]
+
+        # Caso mais simples: (x, y)
+        if isinstance(val, tuple) and len(val) == 2:
+            a, b = val
+            # (x, y) direto
+            if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+                return float(a), float(b)
+            # (algo, (x, y))
+            if isinstance(b, tuple) and len(b) == 2:
+                x, y = b
+                if isinstance(x, (int, float)) and isinstance(y, (int, float)):
+                    return float(x), float(y)
+
+        # Se não reconhecer, retorna None sem quebrar o sistema
+        return None
+
     def _calcular_distancia_entre_nos(self, no1: str, no2: str) -> float:
-        """Calcula a distância real entre dois nós baseado nas posições do stage"""
-        if no1 in self.posicoes and no2 in self.posicoes:
-            _, (x1, y1) = self.posicoes[no1]
-            _, (x2, y2) = self.posicoes[no2]
-            return ((x2 - x1)**2 + (y2 - y1)**2)**0.5
-        return 1.0  # distância padrão se não encontrar posições
+        """
+        Calcula a distância euclidiana entre dois nós, baseada nas posições do Stage.
+
+        - Usa um cache interno para não recalcular sempre.
+        - Se qualquer nó não tiver posição válida, retorna 1.0 como fallback.
+        """
+        if not hasattr(self, "_dist_cache"):
+            self._dist_cache = {}
+
+        chave = tuple(sorted((no1, no2)))
+        if chave in self._dist_cache:
+            return self._dist_cache[chave]
+
+        coord1 = self._extrair_coordenadas_no(no1)
+        coord2 = self._extrair_coordenadas_no(no2)
+
+        if coord1 is None or coord2 is None:
+            dist = 1.0  # fallback
+        else:
+            x1, y1 = coord1
+            x2, y2 = coord2
+            dist = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+
+        self._dist_cache[chave] = dist
+        return dist
 
     def _obter_tempo_voo_aresta(self, u: str, v: str) -> float:
-        """Calcula tempo de voo baseado na distância real entre nós"""
+        """
+        Calcula tempo de voo baseado na distância real entre nós.
+
+        Usa self.velocidade_media se existir; caso contrário, assume 2.0 m/s.
+        """
         distancia = self._calcular_distancia_entre_nos(u, v)
-        velocidade_media = 2.0  # m/s - ajuste conforme seu sistema
+        velocidade_media = getattr(self, "velocidade_media", 2.0)  # m/s
+        if velocidade_media <= 0:
+            velocidade_media = 2.0
         return distancia / velocidade_media
 
     def _obter_consumo_energia_aresta(self, u: str, v: str) -> float:
-        """Calcula consumo de energia baseado na distância real - RETORNA CUSTO POSITIVO"""
+        """
+        Calcula consumo de energia baseado na distância real.
+
+        Retorna um custo POSITIVO (gasto de energia).
+        Usa self.consumo_por_metro se existir; caso contrário, assume 0.1.
+        """
         distancia = self._calcular_distancia_entre_nos(u, v)
-        consumo_por_metro = 0.1  # ajuste conforme seu sistema
-        return distancia * consumo_por_metro  # POSITIVO pois é custo
+        consumo_por_metro = getattr(self, "consumo_por_metro", 0.1)
+        if consumo_por_metro < 0:
+            consumo_por_metro = abs(consumo_por_metro)
+        return distancia * consumo_por_metro
+
+    def _precomputar_distancia_para_vertices_especiais(self):
+        """
+        Pré-computa, para cada nó do grafo, a distância até o vértice especial mais próximo.
+
+        Vértices especiais: FORNECEDOR, CLIENTE, ESTACAO, VERTIPORT.
+        A distância é euclidiana nas coordenadas do Stage.
+        """
+        especiais = []
+        for n in self.G.nodes():
+            tipo_no = self._tipo_norm(self.G.nodes[n].get("tipo", ""))
+            if tipo_no in {"FORNECEDOR", "CLIENTE", "ESTACAO", "VERTIPORT"}:
+                especiais.append(n)
+
+        self._dist_min_especial = {}
+
+        # Se não há vértices especiais, tudo fica com distância 0.0
+        if not especiais:
+            for n in self.G.nodes():
+                self._dist_min_especial[n] = 0.0
+            return
+
+        for n in self.G.nodes():
+            if n in especiais:
+                self._dist_min_especial[n] = 0.0
+            else:
+                # distância até o especial mais próximo
+                d_min = min(self._calcular_distancia_entre_nos(n, s) for s in especiais)
+                self._dist_min_especial[n] = d_min
 
     def _inicializar_custos_estados(self):
         """
         Inicializa custos W = [E, Tf, D] com base em uma filosofia de "custo de oportunidade".
-        
-        Dimensões:
-        - E (Energia):   Positivo = Custo; Negativo = Incentivo (Carregar)
-        - Tf (Tempo):    Positivo = Custo (Duração)
-        - D (Progresso): Positivo = Custo (Penalidade de Tempo); Negativo = Incentivo (Missão)
-        """
-        
-        # ==================================================================
-        # 1. CONSTANTES DE CUSTO (Ajuste estes valores para calibrar)
-        # ==================================================================
-        
-        # (D) Penalidade base por passo de tempo. Isso torna a inatividade custosa.
-        CUSTO_TEMPO_D = 0.5 
-        
-        # (E) Custo de energia para movimento (além do custo da aresta)
-        CUSTO_MOVIMENTO_E = 0.2
-        
-        # (E) Custo de energia para operar (hovering em nós de trabalho)
-        CUSTO_OPERACIONAL_E = 0.1
-        
-        # (E) Incentivo (negativo) por estar em um nó de carregamento
-        INCENTIVO_CARGA_E = -1.0
-        
-        # (D) Incentivo (negativo) para progresso de missão
-        INCENTIVO_COLETA_D = -5.0
-        INCENTIVO_ENTREGA_D = -10.0
-        
-        # (E, D) Penalidades severas para estados indesejados
-        PENALIDADE_BATERIA_E = 10.0
-        PENALIDADE_BATERIA_D = 10.0
 
-        
-        # ==================================================================
-        # 2. INICIALIZAÇÃO: CUSTO DE OPORTUNIDADE (D)
-        # ==================================================================
-        # Todos os estados atômicos começam com um custo de progresso positivo (penalidade de tempo).
-        # Isso corrige o problema do "custo zero" para estados ociosos.
+        Dimensões:
+        - E (Energia):   >0 = custo;  <0 = incentivo (carregar)
+        - Tf (Tempo):    >0 = custo de duração física
+        - D (Progresso): >0 = penalidade (ociosidade/atraso); <0 = incentivo de missão
+        """
+
+        # Garante dicionário de parâmetros de custo
+        if not hasattr(self, "cost_params"):
+            self.cost_params = {}
+
+        cp = self.cost_params
+
+        # Valores padrão (se não existirem)
+        cp.setdefault("CUSTO_TEMPO_D", 0.5)
+        cp.setdefault("CUSTO_MOVIMENTO_E", 0.2)
+        cp.setdefault("CUSTO_OPERACIONAL_E", 0.1)
+        cp.setdefault("INCENTIVO_CARGA_E", -1.0)
+        cp.setdefault("INCENTIVO_COLETA_D", -5.0)
+        cp.setdefault("INCENTIVO_ENTREGA_D", -10.0)
+        cp.setdefault("PENALIDADE_BATERIA_E", 10.0)
+        cp.setdefault("PENALIDADE_BATERIA_D", 10.0)
+
+        CUSTO_TEMPO_D        = cp["CUSTO_TEMPO_D"]
+        CUSTO_MOVIMENTO_E    = cp["CUSTO_MOVIMENTO_E"]
+        CUSTO_OPERACIONAL_E  = cp["CUSTO_OPERACIONAL_E"]
+        INCENTIVO_CARGA_E    = cp["INCENTIVO_CARGA_E"]
+        INCENTIVO_COLETA_D   = cp["INCENTIVO_COLETA_D"]
+        INCENTIVO_ENTREGA_D  = cp["INCENTIVO_ENTREGA_D"]
+        PENALIDADE_BATERIA_E = cp["PENALIDADE_BATERIA_E"]
+        PENALIDADE_BATERIA_D = cp["PENALIDADE_BATERIA_D"]
+
+        # Precomputar distâncias para vértices especiais (usado na análise global)
+        self._precomputar_distancia_para_vertices_especiais()
+
+        # ------------------------------------------------------------------
+        # 1. Base: todos os estados atômicos recebem penalidade de tempo D>0
+        # ------------------------------------------------------------------
+        self.custos_estado_atomico.clear()
+
         for nome_automato, automato in self.Dicionario_Automatos.items():
             for estado in states(automato):
-                self.custos_estado_atomico[str(estado)] = (
+                est_str = str(estado)
+                self.custos_estado_atomico[est_str] = (
                     0.0,            # E (Energia)
-                    0.0,            # Tf (Tempo Físico)
-                    CUSTO_TEMPO_D   # D (Progresso) - Penalidade de tempo
+                    0.0,            # Tf (Tempo físico)
+                    CUSTO_TEMPO_D   # D (penalidade de passo/ociosidade)
                 )
-        
-        # ==================================================================
-        # 3. CUSTOS DE MOVIMENTO (E, Tf)
-        # ==================================================================
-        
-        # Custo genérico de estar no estado "Movendo" (do _automato_movimento)
+
+        # ------------------------------------------------------------------
+        # 2. Movimento: "Movendo" + arestas ocupadas
+        # ------------------------------------------------------------------
+
+        # Estado "Movendo" (automato de movimento)
         if "Movendo" in self.custos_estado_atomico:
+            # Aqui Tf é MENOR do que ficar parado (ajustamos 'Parado' via análise global)
             self.custos_estado_atomico["Movendo"] = (
-                CUSTO_MOVIMENTO_E,  # E: Custo base de energia para se mover
-                0.1,                # Tf: Custo base de tempo
-                CUSTO_TEMPO_D       # D: Mantém a penalidade de tempo
+                CUSTO_MOVIMENTO_E,  # E: custo base de energia por se mover
+                0.1,                # Tf: custo de tempo em movimento
+                CUSTO_TEMPO_D       # D: ainda paga custo de passo
             )
-            
-        # Custo específico da aresta (do _automatos_arestas)
+
+        # Estados ocupados de aresta (ocupado_uv / ocupado_vu)
         for u, v, k, data in self.G.edges(keys=True, data=True):
             chave = (tuple(sorted((u, v))), k)
             if chave not in self.dict_aresta_eventos:
-                continue # Garante que o evento foi criado
-                
+                continue
+
             tempo_voo = self._obter_tempo_voo_aresta(u, v)
             consumo_energia = self._obter_consumo_energia_aresta(u, v)
-            
+
             for estado_ocupado in [f"ocupado_{u}{v}", f"ocupado_{v}{u}"]:
                 if estado_ocupado in self.custos_estado_atomico:
-                    # Este custo é SOMADO ao custo de "Movendo"
                     self.custos_estado_atomico[estado_ocupado] = (
-                        consumo_energia,  # E: Custo (gasto)
-                        tempo_voo,        # Tf: Custo (duração)
-                        CUSTO_TEMPO_D     # D: Mantém a penalidade de tempo
+                        consumo_energia,  # E: custo de energia da aresta
+                        tempo_voo,        # Tf: duração física
+                        CUSTO_TEMPO_D     # D: penalidade base de passo
                     )
-        
-        # ==================================================================
-        # 4. CUSTOS/INCENTIVOS DE LOCALIZAÇÃO (E)
-        # ==================================================================
-        # ATENÇÃO: Usamos os estados do _automato_mapa (ex: "VERTIPORT_0")
-        # em vez de "dentro_{n}", pois os logs mostraram que o VANT
-        # pode estar no nó (mapa) mas "fora" (loc_{n}) no estado inicial.
-        
+
+        # ------------------------------------------------------------------
+        # 3. Localização: nós de carga / nós de trabalho
+        # ------------------------------------------------------------------
         for nome_no in self.G.nodes():
-            estado_mapa = str(nome_no) # Estado do _automato_mapa
+            estado_mapa = str(nome_no)  # estado do automato "mapa"
             if estado_mapa not in self.custos_estado_atomico:
                 continue
-                
+
             tipo_no = self._tipo_norm(self.G.nodes[nome_no].get("tipo", ""))
-            
+
             if tipo_no in {"ESTACAO", "VERTIPORT"}:
-                # INCENTIVO de energia por estar em local de carga
+                # Incentivo em E (carregar) mas ainda paga penalidade de passo em D
                 self.custos_estado_atomico[estado_mapa] = (
-                    INCENTIVO_CARGA_E,  # E: Incentivo (negativo)
+                    INCENTIVO_CARGA_E,  # E: incentivo (negativo)
                     0.0,                # Tf
-                    CUSTO_TEMPO_D       # D: Mantém a penalidade de tempo
+                    CUSTO_TEMPO_D       # D: penalidade base de tempo
                 )
             elif tipo_no in {"FORNECEDOR", "CLIENTE"}:
-                # CUSTO de energia por estar em local de trabalho (hovering)
+                # Ficar "hovering" no nó de trabalho custa um pouco de energia
                 self.custos_estado_atomico[estado_mapa] = (
-                    CUSTO_OPERACIONAL_E, # E: Custo (positivo)
-                    0.0,                 # Tf
-                    CUSTO_TEMPO_D        # D: Mantém a penalidade de tempo
+                    CUSTO_OPERACIONAL_E,  # E: custo leve
+                    0.0,                  # Tf
+                    CUSTO_TEMPO_D         # D
                 )
-            # Nós lógicos (sem tipo) mantêm o custo (0.0 E, 0.0 Tf, 0.5 D)
+            # Nós lógicos (sem tipo) permanecem com (0.0, 0.0, CUSTO_TEMPO_D) aqui;
+            # o forte custo por ficar parado neles será tratado no nível do supervisor.
 
-        # ==================================================================
-        # 5. INCENTIVOS DE PROGRESSO DE MISSÃO (D)
-        # ==================================================================
-        
-        # Estados de trabalho ativo (do _automato_modos)
+        # ------------------------------------------------------------------
+        # 4. Estados de trabalho ativo (modos + workflow)
+        # ------------------------------------------------------------------
+
+        # Modos locais: trabalhando_FORNECEDOR / trabalhando_CLIENTE
         for nome_no in self.G.nodes():
             tipo_no = self._tipo_norm(self.G.nodes[nome_no].get("tipo", ""))
-            estado_trabalhando = f"trabalhando_{nome_no}"
-            
-            if estado_trabalhando in self.custos_estado_atomico:
+            estado_trab = f"trabalhando_{nome_no}"
+
+            if estado_trab in self.custos_estado_atomico:
                 if tipo_no == "FORNECEDOR":
-                    # GRANDE INCENTIVO de progresso (D negativo)
-                    self.custos_estado_atomico[estado_trabalhando] = (
-                        CUSTO_OPERACIONAL_E,  # E: Custo de operar
-                        0.0,                  # Tf
-                        INCENTIVO_COLETA_D    # D: Incentivo (negativo)
+                    self.custos_estado_atomico[estado_trab] = (
+                        CUSTO_OPERACIONAL_E,   # E: custo de operar
+                        0.0,                   # Tf
+                        INCENTIVO_COLETA_D     # D: incentivo forte (negativo)
                     )
                 elif tipo_no == "CLIENTE":
-                    # INCENTIVO MÁXIMO de progresso (D negativo)
-                    self.custos_estado_atomico[estado_trabalhando] = (
-                        CUSTO_OPERACIONAL_E,  # E: Custo de operar
-                        0.0,                  # Tf
-                        INCENTIVO_ENTREGA_D   # D: Incentivo (negativo)
+                    self.custos_estado_atomico[estado_trab] = (
+                        CUSTO_OPERACIONAL_E,
+                        0.0,
+                        INCENTIVO_ENTREGA_D    # D: incentivo ainda maior
                     )
 
-        # Estados do Workflow (do _automato_trabalho)
+        # Workflow global (pick/place)
         if "pick" in self.custos_estado_atomico:
             self.custos_estado_atomico["pick"] = (
-                0.0,                # E
-                0.0,                # Tf
-                INCENTIVO_COLETA_D  # D: Incentivo (negativo)
+                0.0,
+                0.0,
+                INCENTIVO_COLETA_D
             )
         if "place" in self.custos_estado_atomico:
             self.custos_estado_atomico["place"] = (
-                0.0,                 # E
-                0.0,                 # Tf
-                INCENTIVO_ENTREGA_D  # D: Incentivo (negativo)
+                0.0,
+                0.0,
+                INCENTIVO_ENTREGA_D
             )
 
-        # ==================================================================
-        # 6. PENALIDADES (E, D)
-        # ==================================================================
-        
-        # Estado de bateria baixa (do _automato_bateria_movimento)
-        estado_bat_baixa = "bat_baixa"
-        if estado_bat_baixa in self.custos_estado_atomico:
-            # CUSTO MUITO ALTO (penalidade) em E e D
-            self.custos_estado_atomico[estado_bat_baixa] = (
-                PENALIDADE_BATERIA_E,  # E: Penalidade
-                0.0,                   # Tf
-                PENALIDADE_BATERIA_D   # D: Penalidade
+        # ------------------------------------------------------------------
+        # 5. Penalidades fortes (bateria baixa, etc.)
+        # ------------------------------------------------------------------
+        if "bat_baixa" in self.custos_estado_atomico:
+            self.custos_estado_atomico["bat_baixa"] = (
+                PENALIDADE_BATERIA_E,  # E: penalidade alta
+                0.0,
+                PENALIDADE_BATERIA_D   # D: penalidade alta
             )
-
 
     def obter_custo_estado_supervisor(self, estado_supervisor) -> Tuple[float, float, float]:
-        """Calcula custo W = [E, Tf, D] para um estado do supervisor somando estados componentes"""
+        """
+        Calcula custo W = [E, Tf, D] para um estado do supervisor, somando:
+
+        1) custos base dos estados atômicos (self.custos_estado_atomico)
+        2) ajustes de contexto:
+           - penalidade por estar longe de vértices especiais
+           - custo maior de Tf quando o agente está Parado
+           - custo muito alto por ficar parado em nó lógico
+        """
+        cp = self.cost_params
+
+        # Parâmetros adicionais para análise no nível do supervisor
+        cp.setdefault("PESO_DISTANCIA_D", 0.05)            # ganho em D por metro de distância
+        cp.setdefault("FATOR_DISTANCIA_TAREFA", 2.0)       # reforça distância quando há tarefa ativa
+        cp.setdefault("EXTRA_TF_PARADO", 0.2)              # Tf extra por estar Parado
+        cp.setdefault("EXTRA_TF_PARADO_LOGICO", 0.5)       # Tf extra por estar Parado em nó lógico
+        cp.setdefault("PENALIDADE_NO_LOGICO_D", 2.0)       # D extra por passo parado em nó lógico
+
+        PESO_DISTANCIA_D        = cp["PESO_DISTANCIA_D"]
+        FATOR_DISTANCIA_TAREFA  = cp["FATOR_DISTANCIA_TAREFA"]
+        EXTRA_TF_PARADO         = cp["EXTRA_TF_PARADO"]
+        EXTRA_TF_PARADO_LOGICO  = cp["EXTRA_TF_PARADO_LOGICO"]
+        PENALIDADE_NO_LOGICO_D  = cp["PENALIDADE_NO_LOGICO_D"]
+
         E_total, Tf_total, D_total = 0.0, 0.0, 0.0
-        
-        # O estado do supervisor é uma tupla de estados atômicos
-        for estado_componente in estado_supervisor.split('|'):
-            estado_str = str(estado_componente)
-            if estado_str in self.custos_estado_atomico:
-                E, Tf, D = self.custos_estado_atomico[estado_str]
+
+        # O estado do supervisor vem como string "s1|s2|...|sn"
+        componentes = [c.strip() for c in str(estado_supervisor).split('|') if c.strip()]
+
+        # 1) Soma dos custos base de cada estado atômico
+        for estado_componente in componentes:
+            if estado_componente in self.custos_estado_atomico:
+                E, Tf, D = self.custos_estado_atomico[estado_componente]
                 E_total += E
                 Tf_total += Tf
                 D_total += D
-        
+
+        # 2) Análise de contexto: mapa, movimento, modos, trabalho
+        map_node = None
+        for c in componentes:
+            if c in self.G.nodes:  # componente que coincide com um nó do grafo
+                map_node = c
+                break
+
+        is_moving  = ("Movendo" in componentes)
+        is_stopped = ("Parado" in componentes)
+
+        # Presença de automatos mais ligados à tarefa
+        has_trabalho_modos = any(c.startswith("trabalhando_") for c in componentes)
+        has_tarefa_completa = any(c.startswith("pode_sair_") for c in componentes)
+        has_workflow = any(c in {"pick", "place"} for c in componentes)
+        # Usamos um flag geral de "contexto de tarefa"
+        contexto_tarefa = has_trabalho_modos or has_tarefa_completa or has_workflow
+
+        # 2.1) Penalidade por distância a vértices especiais
+        if map_node is not None and hasattr(self, "_dist_min_especial"):
+            dist = self._dist_min_especial.get(map_node, 0.0)
+
+            if dist > 0.0:
+                ganho_dist = PESO_DISTANCIA_D
+                if contexto_tarefa:
+                    # Se há tarefa em jogo, ficar longe de vértices especiais é ainda pior
+                    ganho_dist *= FATOR_DISTANCIA_TAREFA
+
+                D_total += ganho_dist * dist
+
+                # Se está Parado longe de vértice especial, aumenta também Tf
+                if is_stopped:
+                    Tf_total += EXTRA_TF_PARADO * (1.0 + dist)
+
+        # 2.2) Penalidade forte por ficar parado em nó lógico (sem tipo)
+        if map_node is not None:
+            tipo_no = self._tipo_norm(self.G.nodes[map_node].get("tipo", ""))
+
+            if tipo_no == "" and is_stopped:
+                # Nó lógico + agente parado: extremamente indesejável
+                D_total += PENALIDADE_NO_LOGICO_D
+                Tf_total += EXTRA_TF_PARADO_LOGICO
+
+        # 2.3) Mesmo sem nó lógico, estar Parado deve ter Tf maior que Movendo
+        #      (se ainda não foi ajustado acima)
+        if is_stopped and map_node is None:
+            Tf_total += EXTRA_TF_PARADO
+
         return (E_total, Tf_total, D_total)
-   
+
     def criar_dicionario_custo_supervisor(self) -> Dict[str, Tuple[float, float, float]]:
         """
         Gera um dicionário mapeando cada estado do supervisor ao seu custo total W=[E, Tf, D].
@@ -422,33 +579,27 @@ class GenericVANTModel:
             raise ValueError(
                 "O supervisor monolítico não foi calculado. "
                 "Chame 'compute_monolithic_supervisor()' primeiro."
-                )
+            )
 
         custos_supervisor: Dict[str, Tuple[float, float, float]] = {}
-                
+
         for estado_supervisor in states(self.supervisor_mono):
-        
-            custo_combinado = self.obter_custo_estado_supervisor(str(estado_supervisor))
-                    
-            custos_supervisor[str(estado_supervisor)] = custo_combinado
-                    
+            estado_str = str(estado_supervisor)
+            custo_combinado = self.obter_custo_estado_supervisor(estado_str)
+            custos_supervisor[estado_str] = custo_combinado
+
+        self.dicionario_custos_supervisor = custos_supervisor
         print(f"[INFO] Dicionário de custos criado para {len(custos_supervisor)} estados do supervisor.")
-        
+
         return custos_supervisor
-        
-    def atualizar_custo_estado_supervisor(self, 
-                                     estado_supervisor_str: str,
-                                     novo_custo_vetor: Tuple[float, float, float]):
+
+    def atualizar_custo_estado_supervisor(
+        self,
+        estado_supervisor_str: str,
+        novo_custo_vetor: Tuple[float, float, float]
+    ):
         """
         Atualiza o vetor de custos [E, Tf, D] para um estado específico no dicionário de custos do supervisor.
-
-        Args:
-            estado_supervisor_str (str): O estado do supervisor a ser atualizado (string).
-            novo_custo_vetor (Tuple[float, float, float]): O novo vetor de custos [E, Tf, D].
-        
-        Raises:
-            AttributeError: Se 'dicionario_custos_supervisor' não foi inicializado.
-            KeyError: Se o estado não for encontrado no dicionário.
         """
         # 1. Verificar Inicialização do Dicionário
         if not hasattr(self, 'dicionario_custos_supervisor') or self.dicionario_custos_supervisor is None:
@@ -462,34 +613,65 @@ class GenericVANTModel:
             raise ValueError(
                 f"O novo custo deve ser uma tupla de 3 floats (E, Tf, D). Recebido: {novo_custo_vetor}"
             )
-            
+
         # 3. Atualizar o Custo no Dicionário
         if estado_supervisor_str in self.dicionario_custos_supervisor:
-            
+
             custo_antigo = self.dicionario_custos_supervisor[estado_supervisor_str]
-            
+
             # Sobrescreve o custo no dicionário
             self.dicionario_custos_supervisor[estado_supervisor_str] = novo_custo_vetor
-            
+
             print(f"[INFO] 📝 Custo do estado '{estado_supervisor_str}' atualizado com sucesso.")
             print(f"       Custo Antigo (E, Tf, D): {custo_antigo}")
             print(f"       Novo Custo (E, Tf, D):   {novo_custo_vetor}")
-            
+
         else:
             raise KeyError(
                 f"O estado '{estado_supervisor_str}' não foi encontrado no dicionário de custos do supervisor."
             )
-    
-    def atualizar_parametros_custo(self, 
-                                   consumo_por_metro: float = None,
-                                   velocidade_media: float = None,
-                                   ganho_carregamento: float = None):
-        """Atualiza parâmetros e recalcula custos"""
-        # Aqui você pode adicionar lógica para atualizar parâmetros
-        # e chamar _inicializar_custos_estados() novamente se necessário
-        if any(param is not None for param in [consumo_por_metro, velocidade_media, ganho_carregamento]):
-            print("[INFO] Parâmetros de custo atualizados - recalculando...")
+
+    def atualizar_parametros_custo(
+        self,
+        consumo_por_metro: float = None,
+        velocidade_media: float = None,
+        ganho_carregamento: float = None
+    ):
+        """
+        Atualiza parâmetros físicos (velocidade, consumo) e de custo de carga, e recalcula custos.
+
+        - consumo_por_metro: energia gasta por metro (E > 0)
+        - velocidade_media:  velocidade de cruzeiro (m/s)
+        - ganho_carregamento: módulo do incentivo em E para nós de carga
+        """
+        if not hasattr(self, "cost_params"):
+            self.cost_params = {}
+
+        updated = False
+
+        if consumo_por_metro is not None:
+            self.consumo_por_metro = float(abs(consumo_por_metro))
+            updated = True
+
+        if velocidade_media is not None:
+            self.velocidade_media = float(abs(velocidade_media)) if velocidade_media != 0 else 2.0
+            updated = True
+
+        if ganho_carregamento is not None:
+            # Interpreta como "quão forte é o incentivo de estar carregando"
+            self.cost_params["INCENTIVO_CARGA_E"] = -abs(ganho_carregamento)
+            updated = True
+
+        if updated:
+            print("[INFO] Parâmetros físicos/custos atualizados - recalculando custos de estados...")
+            # Zera caches de distância (se houver)
+            if hasattr(self, "_dist_cache"):
+                self._dist_cache.clear()
+            # Recalcula custos por estado atômico
             self._inicializar_custos_estados()
+            # Opcional: se já existe supervisor, recalcule dicionário de custos globais
+            if hasattr(self, "supervisor_mono") and self.supervisor_mono is not None:
+                self.criar_dicionario_custo_supervisor()
 
     # ------------------------- Acesso rápido -------------------------
     def ev(self, nome: str) -> Any:
@@ -1059,8 +1241,7 @@ class VANTInstance:
                     f"[{self.name}] Sequência de eventos vazia. "
                     f"Abortando tarefa {tarefa}."
                 )
-                self._tarefa_ativa = None
-                return
+                
 
             # Eventos habilitados no estado atual (id-específicos)
             enabled = set(self.enabled_events())
