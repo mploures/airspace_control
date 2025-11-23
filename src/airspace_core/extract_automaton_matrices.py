@@ -1,27 +1,18 @@
 import numpy as np
 from ultrades.automata import *
-# import matplotlib.pyplot as plt  # não usado; pode remover
+import scipy.sparse as sp 
+
 
 def extract_automaton_matrices(G, k):
     """
-    G: DFA da UltraDES
-    k: número de componentes de custo (int ou string convertível para int)
-
-    Retorna:
-    A ∈ {0,1}^{n x n}  (adjacency matrix)
-    B ∈ {0,1}^{m x n}  (event reachability matrix: linha=evento, coluna=estado destino)
-    C ∈ {0,1}^{n x m}  (event availability matrix: linha=estado origem, coluna=evento)
-    W ∈ ℝ^{n x k}      (state cost matrix, zeros)
-    D ∈ ℝ^{m x m}      (min temporal separation, zeros)
-    event_dict: {str(event): (event_obj, one_hot_vector)}
+    Versão OTIMIZADA usando SciPy Sparse (COO -> CSR).
     """
-    # --- Normaliza k (corrige TypeError: 'str' object cannot be interpreted as an integer)
     try:
         k = int(k)
     except Exception as err:
         raise TypeError(f"'k' must be an integer (got {k!r})") from err
 
-    # --- Materializa iteráveis da UltraDES (corrige o erro de len())
+    # 1. Materializa e Indexa
     Q = list(states(G))
     E = list(events(G))
     T = list(transitions(G))
@@ -29,37 +20,63 @@ def extract_automaton_matrices(G, k):
     n = len(Q)
     m = len(E)
 
-    # Índices
     state_index = {q: i for i, q in enumerate(Q)}
     event_index = {e: i for i, e in enumerate(E)}
 
-    # Matrizes booleanas compactas
-    A = np.zeros((n, n), dtype=np.bool_)
-    B = np.zeros((m, n), dtype=np.bool_)  # linha=evento, coluna=estado destino
-    C = np.zeros((n, m), dtype=np.bool_)  # linha=estado origem, coluna=evento
+    # 2. Coleta de Índices para Matrizes Esparsas
+    # COO (Coordinate format) é o mais rápido para construção
+    A_rows, A_cols = [], []
+    B_rows, B_cols = [], []
+    C_rows, C_cols = [], []
 
-    # Preenche a partir das transições
     for (q_i, sigma, q_j) in T:
         i = state_index[q_i]
         j = state_index[q_j]
         eidx = event_index[sigma]
 
-        A[i, j] = True
-        B[eidx, j] = True
-        C[i, eidx] = True
+        # Matriz A (n x n): De i para j
+        A_rows.append(i)
+        A_cols.append(j)
+        
+        # Matriz B (m x n): Evento eidx alcança estado destino j
+        B_rows.append(eidx)
+        B_cols.append(j)
+        
+        # Matriz C (n x m): Estado origem i disponibiliza evento eidx
+        C_rows.append(i)
+        C_cols.append(eidx)
 
-    # Custos e separações temporais
+    # 3. Construção e Conversão para CSR
+    # dtype=np.float32 ou np.int8 são mais rápidos que booleanos em sparse
+    
+    # Valores de 1 para as coordenadas
+    data = np.ones(len(T), dtype=np.int8) 
+
+    # Matriz A: (n x n)
+    A_coo = sp.coo_matrix((data, (A_rows, A_cols)), shape=(n, n), dtype=np.int8)
+    A_csr = A_coo.tocsr() # CSR é ótimo para slicing por linha (como em compute_reach)
+    
+    # Matriz B: (m x n)
+    B_coo = sp.coo_matrix((data, (B_rows, B_cols)), shape=(m, n), dtype=np.int8)
+    B_csr = B_coo.tocsr() 
+
+    # Matriz C: (n x m)
+    C_coo = sp.coo_matrix((data, (C_rows, C_cols)), shape=(n, m), dtype=np.int8)
+    C_csr = C_coo.tocsr() 
+
+    # 4. Custos e Separações (Mantidos em NumPy denso, já que W e D são densos)
     W = np.zeros((n, k), dtype=np.float32)
     D = np.zeros((m, m), dtype=np.float32)
 
-    # One-hots por evento
+    # 5. One-hots por evento (Mantido)
     event_dict = {}
     for e in E:
         onehot = np.zeros(m, dtype=np.bool_)
         onehot[event_index[e]] = True
         event_dict[str(e)] = (e, onehot)
 
-    return A, B, C, W, D, event_dict,state_index
+    # Retorna matrizes esparsas!
+    return A_csr, B_csr, C_csr, W, D, event_dict, state_index
 
 
 def print_automaton_data(A, B, C, W, D, event_dict):
