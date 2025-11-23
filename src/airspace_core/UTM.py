@@ -1,6 +1,9 @@
 import networkx as nx
-from typing import Dict, Any, Tuple, List, Set
 import os, sys, re 
+import threading
+from typing import Dict, Any, Tuple, List, Set, Union
+import rospy
+from std_msgs.msg import String
 
 # --- Caminho p/ achar graph/ ao executar via ROS ou direto ---
 _pkg_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
@@ -9,6 +12,8 @@ if _pkg_root not in sys.path:
 
 from ultrades.automata import *
 from graph.gerar_grafo import carregar_grafo_txt  
+
+_RE_SUFFIX = re.compile(r"^(.*)_(\d+)$")
 
 # --- Funções Auxiliares para Cálculo do Supervisor ---
 
@@ -304,7 +309,220 @@ class UTMModel:
             self.supervisor_mono = monolithic_supervisor(self.plantas, self.specs)
         return self.supervisor_mono
 
+class UTMROSInterface:
+    def __init__(self,
+                 grafo_txt: str,
+                 init_node: str,
+                 num_agent: int = 1,
+                 node_name: str = "utm_supervisor_node"):
+        
+        # ---------------- 1. Inicialização do Modelo DES ----------------
+        self.utm_model = UTMModel(grafo_txt, init_node, num_agent)
+        self.supervisor = self.utm_model.supervisor_mono
+        self.eventos_proibidos_estado = self.utm_model.eventos_proibidos_estado
+        self.name = node_name
+        self.num_agent = num_agent
+        
+        # Estado individual de cada agente no supervisor monolítico
+        self.agent_states = self.utm_model.agent_state 
+        self.state_lock = threading.Lock() # Para acesso seguro ao estado
+        
+        # O mapa de eventos factíveis é útil para calcular o que é "permitido"
+        self._factible_events_map = self._get_factible_events_map(self.supervisor)
+        
+        self.generic_event_objects = self.utm_model.eventos
+        
+        # ---------------- 2. Inicialização e Canais ROS ----------------
+        rospy.init_node(self.name, anonymous=False)
 
+        # 1. Publicadores
+        # Publica estado (formato: "state1-||-state2-||-...")
+        self.pub_state        = rospy.Publisher(f"/{self.name}/state", String, queue_size=10, latch=True) 
+        # Publica eventos proibidos globais (APENAS BLOQUEIOS GENÉRICOS)
+        self.pub_global_prohibited = rospy.Publisher("/eventos_proibidos", String, queue_size=10, latch=True)
+        
+        # Publica tarefas (repassando)
+        self.pub_tarefas      = rospy.Publisher("/tarefas", String, queue_size=10)
+        
+        # Publica eventos HABILITADOS (Permitidos) - para compatibilidade com AutomatonNode
+        self.pub_events = rospy.Publisher(f"/{self.name}/possible_events", String, queue_size=10, latch=True)
+        self.pub_enabled_events = rospy.Publisher(f"/{self.name}/enabled_events", String, queue_size=10, latch=True)
+        self.pub_marked = rospy.Publisher(f"/{self.name}/is_marked", String, queue_size=10, latch=True)
+
+        # 2. Subscribers
+        self.sub_event        = rospy.Subscriber("/event", String, self._on_event, queue_size=50)
+        self.sub_tarefas_afazer = rospy.Subscriber("/tarefas_afazer", String, self._on_tarefa_afazer, queue_size=10)
+
+        rospy.sleep(0.5)
+        self._publish_state() # Publica o estado inicial
+
+    # ---------------- 3. Callbacks ROS (Entrada) ----------------
+
+    def _extract_event_info(self, ev_with_id: str) -> Tuple[str, Union[int, None]]:
+        """
+        Extrai o nome do evento genérico e o ID do agente.
+        """
+        m = _RE_SUFFIX.match(ev_with_id)
+        if m:
+            generic_name = m.group(1)
+            agent_id = int(m.group(2))
+            return generic_name, agent_id
+        return ev_with_id, None
+
+    def _on_event(self, msg):
+        """
+        Recebe eventos do barramento /event (com ID) e tenta aplicá-los 
+        no estado específico do agente no supervisor monolítico.
+        """
+        ev_with_id = str(msg.data or "").strip()
+        if not ev_with_id:
+            return
+
+        generic_name, agent_id = self._extract_event_info(ev_with_id)
+        
+        if generic_name == "ping":
+            rospy.loginfo(f"[{self.name}] Ping recebido — republishing state and events.")
+            self._publish_state()
+            return
+            
+        # 1. Checagem e Recuperação do Objeto Evento GENÉRICO
+        # O supervisor monolítico tem transições em eventos GENÉRICOS
+        ev_obj = self.generic_event_objects.get(generic_name)
+        
+        if ev_obj is None or agent_id is None or agent_id < 1 or agent_id > self.num_agent:
+            # Ignora eventos desconhecidos, sem ID ou de IDs inválidos
+            return
+            
+        agent_idx = agent_id - 1
+        
+        with self.state_lock:
+            current_state = self.agent_states[agent_idx]
+            # Busca a transição com o objeto Event GENÉRICO
+            next_state = self._get_next_state(current_state, ev_obj)
+            
+            if next_state is not None:
+                rospy.loginfo(f"[{self.name}] Transição Agente {agent_id}: {current_state} --{generic_name}--> {next_state}")
+                
+                # 2. Atualiza o estado do agente (somente do ID que publicou)
+                self.agent_states[agent_idx] = next_state
+                self._publish_state()
+
+    def _on_tarefa_afazer(self, msg):
+        """Recebe tarefas a serem feitas e as re-publica no canal /tarefas para a frota arbitrar."""
+        tarefa_raw = str(msg.data or "").strip()
+        if tarefa_raw:
+            rospy.loginfo(f"[{self.name}] Tarefa a fazer recebida. Repassando para a frota: {tarefa_raw}")
+            self.pub_tarefas.publish(String(data=tarefa_raw))
+        
+    # ---------------- 4. Lógica do Supervisor DES ----------------
+    
+    def _get_factible_events_map(self, automato: Any) -> Dict[Any, Set[Any]]:
+        """
+        Pré-calcula os eventos factíveis de cada estado do supervisor (como objetos Event).
+        """
+        eventos_por_estado: Dict[Any, Set[Any]] = {s: set() for s in states(automato)}
+        for origem, evento, destino in transitions(automato):
+            eventos_por_estado[origem].add(evento)
+        return eventos_por_estado
+
+    def _get_next_state(self, current_state: Any, event_obj: Any) -> Any:
+        """Busca o próximo estado no autômato supervisor monolítico."""
+        # Itera sobre as transições do supervisor
+        for q, e, d in transitions(self.supervisor):
+            if q == current_state and e == event_obj:
+                return d
+        return None
+
+    def _get_global_prohibited_events(self) -> Set[str]:
+        """
+        Calcula a **união** dos nomes (str) dos eventos proibidos para todos os estados 
+        dos agentes que estão sendo rastreados.
+        """
+        global_prohibited: Set[str] = set()
+        
+        with self.state_lock:
+            for agent_state in self.agent_states:
+                # Recupera os eventos proibidos (objetos Event)
+                events_prohibited_for_state = self.eventos_proibidos_estado.get(agent_state, set())
+                
+                # Adiciona o nome (str) de todos os eventos proibidos deste estado ao conjunto global
+                for ev_obj in events_prohibited_for_state:
+                    global_prohibited.add(str(ev_obj))
+
+        return global_prohibited
+
+    def _get_enabled_events(self) -> Set[str]:
+        """
+        Calcula os eventos HABILITADOS (Factíveis - Proibidos).
+        """
+        # 1. União dos Eventos Factíveis em TODOS os estados dos agentes.
+        all_factible_agent_events: Set[str] = set()
+        with self.state_lock:
+            for agent_state in self.agent_states:
+                factible_events = self._factible_events_map.get(agent_state, set())
+                for ev_obj in factible_events:
+                    all_factible_agent_events.add(str(ev_obj))
+        
+        # 2. Eventos Proibidos Globais
+        global_prohibited = self._get_global_prohibited_events()
+        
+        # 3. Eventos Habilitados (Events Habilitados = Factíveis - Proibidos)
+        enabled_events = all_factible_agent_events.difference(global_prohibited)
+        
+        return enabled_events
+
+    def _get_blocking_events_filtered(self, candidate_events: Set[str]) -> Set[str]:
+        """
+        Filtra os eventos proibidos globais para incluir apenas os 
+        eventos de Bloqueio/Desbloqueio (Controle de Nó).
+        """
+        bloqueios = set()
+        for ev_name in candidate_events:
+            if ev_name.startswith(("bloqueia_", "desbloqueia_")):
+                bloqueios.add(ev_name)
+        
+        return bloqueios
+
+
+    # ---------------- 5. Publicação ROS (Saída) ----------------
+
+    def _publish_state(self):
+        """Publica o estado atual, a lista global de eventos proibidos e os eventos de bloqueio de nó."""
+        
+        # --- 1. Publica o Estado dos Agentes ---
+        state_strs = [str(s) for s in self.agent_states]
+        state_str = "Estado"
+        self.pub_state.publish(state_str)
+        rospy.loginfo(f"[{self.name}] Estados dos Agentes Publicados: {state_str}")
+        
+        # --- 2. Calcula Eventos Proibidos Globais ---
+        global_prohibited = self._get_global_prohibited_events()
+        global_str = ",".join(sorted(global_prohibited))
+        
+        # Publica no canal /eventos_proibidos todos os eventos genéricos proibidos
+        self.pub_global_prohibited.publish(global_str)
+        rospy.loginfo(f"[{self.name}] Eventos PROIBIDOS Globais Publicados em /eventos_proibidos: {global_str}")
+
+
+        # Publica no canal /block_events (se houver um consumidor específico)
+
+        # --- 4. Publica Eventos Habilitados (Permitidos) para Compatibilidade com AutomatonNode ---
+        enabled_events = self._get_enabled_events()
+        blocking_events = self._get_blocking_events_filtered(enabled_events)
+        enabled_str = ",".join(sorted(blocking_events))
+
+        # Publica para que o painel e outros nós saibam o que pode ocorrer
+        self.pub_events.publish(enabled_str) 
+        self.pub_enabled_events.publish(enabled_str)
+        rospy.loginfo(f"[{self.name}] Eventos Habilitados (Permitidos) Publicados: {enabled_str}")
+
+        # --- 5. Estado Marcado ---
+        self.pub_marked.publish("False")
+
+
+    def run(self):
+        """Loop principal do nó."""
+        rospy.spin()
 
 
 
