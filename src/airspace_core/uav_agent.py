@@ -130,12 +130,12 @@ class VANT:
         self.communication_range = self.ros_node.get_param("~communication_range", 10.0)
         self.coordination_enabled = self.ros_node.get_param("~coordination_enabled", True)
 
-        # Partida segura (inalterado)
+        # Partida segura 
         self.t_start = time.time()
         self.start_stagger_s = self.ros_node.get_param("~start_stagger_s", 2.0)
         self.speed_ramp_s = self.ros_node.get_param("~speed_ramp_s", 3.0)
 
-        # Bateria (inalterado)
+        # Bateria 
         self.voltage_nom = self.ros_node.get_param("~voltage_nom", 22.2)
         self.capacity_Wh = self.ros_node.get_param("~capacity_Wh", 180.0)
         self.soc = 1.0
@@ -144,6 +144,8 @@ class VANT:
         self.i_wgain = self.ros_node.get_param("~i_wgain", 1.8)
         self.last_batt_ts = time.time()
         self._last_current = 0.0
+        self.low_batt_threshold = self.ros_node.get_param("~low_batt_threshold", 0.4)
+        self._low_batt_sent = False
 
         # Autodetecção de tópicos
         idx = _extract_index_from_name(self.name)
@@ -305,11 +307,40 @@ class VANT:
         now = time.time()
         dt = max(0.001, now - self.last_batt_ts)
         self.last_batt_ts = now
+
+        # SoC anterior (para detectar cruzamento do limiar)
+        prev_soc = self.soc
         
+        # Consumo de energia
         power = (self.i_base + self.i_vgain * abs(v_cmd) + self.i_wgain * abs(w_cmd)) * self.voltage_nom
-        energy_used = power * (dt / 3600.0)
+        energy_used = 10 * power * (dt / 3600.0)  # Wh
         self.soc = max(0.0, self.soc - (energy_used / self.capacity_Wh))
         self._last_current = power / self.voltage_nom if self.voltage_nom > 0 else 0.0
+
+        # ---- NOVO: disparo do evento bateria_baixa quando cruza 40% ----
+        if (not self._low_batt_sent) and prev_soc > self.low_batt_threshold and self.soc <= self.low_batt_threshold:
+            # Nome do evento com id do robô: bateria_baixa_{id}
+            ev_name = f"bateria_baixa_{self.self_idx}"
+            try:
+                msg = String(data=ev_name)
+                self.pub_event_out.publish(msg)
+                self.ros_node.logwarn(
+                    f"[{self.name}] 🔋 Bateria baixa (SoC={self.soc:.1%}) — evento '{ev_name}' publicado em /event."
+                )
+                self._low_batt_sent = True
+            except Exception as e:
+                self.ros_node.logerr(f"[{self.name}] Erro ao publicar evento de bateria baixa: {e}")
+
+    def restore_full_battery(self):
+        """
+        Restaura a bateria para carga máxima (100%) e libera novo disparo
+        de bateria_baixa no futuro.
+        """
+        self.soc = 1.0
+        self._low_batt_sent = False
+        self.last_batt_ts = time.time()
+        self.ros_node.loginfo(f"[{self.name}] 🔋 Bateria recarregada para 100% (fim_carregar recebido).")
+
 
     def _estimate_remaining_minutes(self):
         avg_power = (self.i_base + self.i_vgain * 0.6 * self.v_max + self.i_wgain * 0.4 * self.omega_max) * self.voltage_nom
