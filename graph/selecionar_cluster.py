@@ -183,7 +183,7 @@ def listar_retangulos(
 # ===========================
 # Atribuição de tipos (farthest-first)
 # ===========================
-def atribuir_tipos(construcoes_roi, N_V, N_E, N_F, N_C, dist_min=50):
+def atribuir_tipos(construcoes_roi, N_V, N_E, N_F, N_C, dist_min=0):
     pts = construcoes_roi[:]
     selecionados = []
 
@@ -537,7 +537,7 @@ def criar_sistema_logistico(
 # Exemplo de uso direto
 # ---------------------------
 if __name__ == "__main__":
-    N_VERTIPORT, N_ESTACAO, N_FORNECEDOR, N_CLIENTE = 1, 1, 2, 3
+    N_VERTIPORT, N_ESTACAO, N_FORNECEDOR, N_CLIENTE = 1, 1, 1, 1
 
     res = criar_sistema_logistico(
         N_VERTIPORT,
