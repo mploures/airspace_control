@@ -79,10 +79,17 @@ class VANT:
         # Objetivo e navegação
         self.goal = None
         self._goal_lock = threading.Lock()
-        self.goal_eps = self.ros_node.get_param("~goal_tolerance", 1.0) # OK
+        self.goal_eps = self.ros_node.get_param("~goal_tolerance", 5) 
         self._pending_release_event = None
         self._path = []
         self._current_path_index = 0
+
+        # Raio de tolerância flexível (padrão 5.0m)
+        self.loose_goal_eps = self.ros_node.get_param("~loose_goal_tolerance", 10.0) 
+        # Tempo mínimo de permanência dentro do raio flexível (padrão 1.0s)
+        self.close_to_goal_time_s = self.ros_node.get_param("~close_to_goal_time_s", 1.0) 
+        self._time_close_to_goal = 0.0 # Timer para rastrear permanência
+        # ------------------------------------------------
 
         # --- AJUSTES BASEADOS NO ROBÔ DE 1.2m E LIDAR DE 5.0m ---
         
@@ -579,12 +586,16 @@ class VANT:
         self._angular_integral = 0.0
         self._last_angular_error = 0.0
         self.escape_maneuver = False
+        self._time_close_to_goal = 0.0
 
     def spin(self):
-        """Loop principal de controle"""
+        """Loop principal de controle com Lógica de Aceitação de Destino (GAL)"""
         last_control_time = time.time()
         last_log_time = 0
-        goal_reached_logged = False
+        
+        # Resetar o timer ao iniciar o ciclo de movimento
+        with self._goal_lock:
+            self._time_close_to_goal = 0.0
 
         self.ros_node.loginfo(f"[{self.name}] 🚀 Iniciando loop de controle principal")
 
@@ -593,32 +604,60 @@ class VANT:
             dt = max(0.001, current_time - last_control_time)
             last_control_time = current_time
 
-            # Computar comando de controle
-            v_cmd, w_cmd = self._compute_control_command()
+            # 1. Checagem de Proximidade e Lógica GAL
+            goal_reached = False
+            
+            if self.goal:
+                goal_x, goal_y = self.goal
+                distance = math.hypot(goal_x - self.x, goal_y - self.y)
 
-            # Verificar se objetivo foi atingido
-            if self._check_goal_reached():
-                if not goal_reached_logged:
-                    self.ros_node.loginfo(f"[{self.name}] ✅ OBJETIVO ATINGIDO!")
-                    goal_reached_logged = True
-                    
-                    # Publicar evento de liberação se existir
-                    if self._pending_release_event:
-                        event_msg = String(data=self._pending_release_event)
-                        self.pub_event_out.publish(event_msg)
-                        self.ros_node.loginfo(f"[{self.name}] 📡 Evento publicado: '{self._pending_release_event}'")
-                        self._pending_release_event = None
-                    
-                    # Parar movimento
-                    v_cmd, w_cmd = 0.0, 0.0
-                    with self._goal_lock:
-                        self.goal = None
-                    break
-            else:
-                goal_reached_logged = False
+                # Opção A: Verificação de objetivo atingido "padrão" (distância pequena + velocidade zero)
+                if self._check_goal_reached(): 
+                    self.ros_node.loginfo(f"[{self.name}] ✅ OBJETIVO ATINGIDO (Tolerância Estrita: {self.goal_eps:.1f}m)!")
+                    goal_reached = True
+                
+                # Opção B: Lógica de Aceitação Flexível (GAL)
+                elif distance <= self.loose_goal_eps:
+                    # Está dentro do raio de tolerância flexível (e.g., 5.0m)
+                    if self._time_close_to_goal == 0.0:
+                        # Começa a contagem
+                        self._time_close_to_goal = current_time
+                        self.ros_node.loginfo(
+                            f"[{self.name}] ⏱️ Entrou no raio GAL (R={self.loose_goal_eps:.1f}m). Iniciando timer."
+                        )
 
-            # Suavizar comando
-            v_cmd, w_cmd = self._smooth_control_command(v_cmd, w_cmd, dt)
+                    time_spent_close = current_time - self._time_close_to_goal
+                    
+                    if time_spent_close >= self.close_to_goal_time_s:
+                        self.ros_node.loginfo(
+                            f"[{self.name}] 🏁 OBJETIVO ALCANÇADO (GAL): Dist={distance:.2f}m < R={self.loose_goal_eps:.1f}m e T>={self.close_to_goal_time_s}s."
+                        )
+                        goal_reached = True
+
+                else:
+                    # Fora do raio flexível, resetar o timer
+                    self._time_close_to_goal = 0.0
+            
+            # --- Fim da Lógica de Proximidade ---
+
+            # 2. Ação de Conclusão (se goal_reached for True)
+            if goal_reached:
+                # Publicar evento de liberação se existir
+                if self._pending_release_event:
+                    event_msg = String(data=self._pending_release_event)
+                    self.pub_event_out.publish(event_msg)
+                    self.ros_node.loginfo(f"[{self.name}] 📡 Evento publicado: '{self._pending_release_event}'")
+                    self._pending_release_event = None
+                
+                # Parar movimento e sair do loop
+                self._stop_movement() # Garante que o timer GAL também seja resetado
+                with self._goal_lock:
+                    self.goal = None
+                break
+            
+            # 3. Execução do Controle (se goal_reached for False)
+            v_desired, w_desired = self._compute_control_command()
+            v_cmd, w_cmd = self._smooth_control_command(v_desired, w_desired, dt)
 
             # Atualizar bateria
             self._battery_update(v_cmd, w_cmd)
@@ -630,14 +669,14 @@ class VANT:
             self.pub_cmd_sim.publish(twist)
             self.pub_cmd_logical.publish(twist)
 
-            # Log periódico
+            # 4. Log periódico
             if current_time - last_log_time > 2.0:  # Log a cada 2 segundos
                 if self.goal:
-                    goal_x, goal_y = self.goal
-                    distance = math.hypot(goal_x - self.x, goal_y - self.y)
+                    distance_log = math.hypot(self.goal[0] - self.x, self.goal[1] - self.y)
+                    time_log = current_time - self._time_close_to_goal if self._time_close_to_goal > 0.0 else 0.0
                     self.ros_node.loginfo(
                         f"[{self.name}] 📊 Estado: pos=({self.x:.1f}, {self.y:.1f}) "
-                        f"goal=({goal_x:.1f}, {goal_y:.1f}) dist={distance:.1f}m "
+                        f"dist={distance_log:.1f}m. GAL T={time_log:.1f}s. "
                         f"cmd=({v_cmd:.2f}, {w_cmd:.2f}) soc={self.soc:.1%}"
                     )
                 last_log_time = current_time
@@ -645,6 +684,7 @@ class VANT:
             self.rate.sleep()
 
         self.ros_node.loginfo(f"[{self.name}] 🔚 Loop de controle encerrado")
+
 
 def main():
     rospy.init_node("uav_agent")

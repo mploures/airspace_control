@@ -208,6 +208,7 @@ class GenericVANTModel:
         self._automato_bateria_movimento()
         self._automatos_localizacao_tarefas()
         self._automato_tarefa_completa()
+        self._automato_fim_de_carga()
         
         # Inicializar custos APÓS construir todos os autômatos
         self._inicializar_custos_estados()
@@ -802,6 +803,37 @@ class GenericVANTModel:
         self.Dicionario_Automatos[f"work_flow_{n}"] = A
         self.specs.append(A)
 
+    def _automato_fim_de_carga(self):
+        # Estados
+        # 'Apto': O VANT está apto a carregar (está fora da estação, ou acabou de entrar/mover). Estado inicial.
+        s_apto = state("apto_carregar", marked=True) 
+        # 'Carregou': O VANT acabou de terminar o carregamento e precisa sair da estação.
+        s_carregou = state("carregou_precisa_sair") 
+        
+        trs = []
+        
+        # Iterar sobre todos os nós para encontrar as Estações (ESTACAO)
+        for n in self.G.nodes():
+            tipo = self._tipo_norm(self.G.nodes[n].get("tipo", ""))
+            if tipo == "ESTACAO":
+                # Eventos de Início e Fim de Carregamento
+                e_ini_carregar = self.ev(f"carregar_{n}")
+                
+                for x in self.G.neighbors(n): 
+                    e_saida = self.ev(f"pega_{n}{x}")
+                    if e_saida is not None:
+                        trs.append((s_carregou, e_saida, s_apto))
+                        trs.append((s_apto, e_saida, s_apto))
+                    
+                trs.append((s_apto, e_ini_carregar, s_carregou))
+                
+
+
+        # Criação do DFA (Deterministic Finite Automaton)
+        A = dfa(trs, s_apto, "fim_de_carga")
+        self.Dicionario_Automatos["fim_de_carga"] = A
+        self.specs.append(A)
+
     def _automato_tarefa_completa(self):
         for n in self.G.nodes():
             tipo = self._tipo_norm(self.G.nodes[n].get("tipo", ""))
@@ -991,6 +1023,7 @@ class VANTInstance:
         """Limpa o estado do VANT após a conclusão de uma missão completa."""
         if self._tarefa_ativa is not None:
             import rospy
+            # Agora _tarefa_ativa pode ser 'Tarefa_1:(F0,C0)'
             rospy.loginfo(f"[{self.name}] MISSÃO CONCLUÍDA: {self._tarefa_ativa}. VANT agora está livre.")
         
         self._tarefa_ativa = None
@@ -1135,14 +1168,14 @@ class VANTInstance:
 
     def _callback_tarefas(self, msg):
         """
-        Recebe tarefas no formato:
-            'FORNECEDOR_X,CLIENTE_Y'
+        Recebe tarefas no formato ATUALIZADO:
+            'ID_TAREFA:FORNECEDOR_X,CLIENTE_Y'
 
         Protocolo Otimizado (Anti-Colisão):
-          1. Checa se já claimada ou ocupado. Se sim, ignora.
+          1. Checa se já claimada (pelo ID completo) ou ocupado. Se sim, ignora.
           2. Espera um **pequeno delay aleatório** (anti-empate).
           3. **VERIFICAÇÃO FINAL**: Checa se a tarefa foi claimada por outro VANT durante o delay.
-          4. Se NÃO claimada, este VANT é o vencedor, PUBLICA o CLAIM para todos.
+          4. Se NÃO claimada, este VANT é o vencedor, PUBLICA o CLAIM (ID completo) para todos.
           5. Ativa a tarefa e dispara o MILP.
         """
         if not self.enable_ros:
@@ -1153,21 +1186,38 @@ class VANTInstance:
         import random
         import threading
 
+        # raw agora é a string completa, incluindo o ID da tarefa. Ex: 'Tarefa_1:F0,C0'
         raw = str(msg.data or "").strip()
         if not raw:
             return
 
-        parts = [p.strip() for p in raw.split(",") if p.strip()]
+        # ----------------------------- NOVO PARSING -----------------------------
+        if ":" not in raw:
+            rospy.logwarn(f"[{self.name}] Formato inválido de tarefa recebida: '{raw}'. Esperado 'ID:FORNECEDOR,CLIENTE'.")
+            self.pub_cmd_event.publish(String(data=f"rejeita_tarefa_{self.id}" ))
+            return
+            
+        # Divide pelo primeiro ':' para separar o ID do resto
+        try:
+            task_id, nodes_raw = raw.split(":", 1)
+        except ValueError:
+            rospy.logwarn(f"[{self.name}] Erro no parsing do ID da tarefa: '{raw}'.")
+            self.pub_cmd_event.publish(String(data=f"rejeita_tarefa_{self.id}" ))
+            return
+
+        # Extrai Fornecedor e Cliente da segunda parte
+        parts = [p.strip() for p in nodes_raw.split(",") if p.strip()]
         if len(parts) != 2:
-            rospy.logwarn(f"[{self.name}] Formato inválido de tarefa recebida: '{raw}'. Esperado 'FORNECEDOR_X,CLIENTE_Y'.")
+            rospy.logwarn(f"[{self.name}] Formato inválido de nós na tarefa: '{nodes_raw}'. Esperado 'FORNECEDOR,CLIENTE'.")
+            self.pub_cmd_event.publish(String(data=f"rejeita_tarefa_{self.id}" ))
             return
 
         fornecedor, cliente = parts[0], parts[1]
+        # -----------------------------------------------------------------------
 
-        # 1. Se a tarefa já foi claimada ou se este VANT está ocupado, ignora.
+        # 1. Se a tarefa (AGORA IDENTIFICADA PELO 'raw' COMPLETO: ID:F,C) já foi claimada ou se este VANT está ocupado, ignora.
         if raw in self._claimed_tasks:
-            rospy.loginfo(f"[{self.name}] Tarefa '{raw}' já foi claimada. Ignorando.")
-            # A publicação de rejeição é opcional aqui, mas pode ajudar o log
+            rospy.loginfo(f"[{self.name}] Tarefa '{raw}' já foi claimada (incluindo o ID único). Ignorando.")
             self.pub_cmd_event.publish(String(data=f"rejeita_tarefa_{self.id}" ))
             return
 
@@ -1177,8 +1227,7 @@ class VANTInstance:
             return
 
         # 2. Pequeno atraso aleatório para evitar empates
-        # Aumentar o limite superior pode dar mais tempo para o primeiro CLAIM ser processado.
-        delay = random.uniform(0.0, 0.5) # Aumentado para 0.5s
+        delay = random.uniform(0.0, 0.5)
         rospy.loginfo(f"[{self.name}] Atraso de {delay:.2f}s para evitar colisão de CLAIM na tarefa '{raw}'.")
         rospy.sleep(delay)
 
@@ -1192,12 +1241,9 @@ class VANTInstance:
         rospy.loginfo(f"[{self.name}] VENCEDOR: Publicando CLAIM para tarefa: {raw}.")
         self.pub_tarefas_claim.publish(String(data=raw))
         
-        # O VANT VENCEDOR precisa garantir que a tarefa seja registrada
-        # imediatamente ANTES de iniciar a thread do MILP.
-        # Nenhuma espera adicional é necessária.
-
         # 5. Ativa a tarefa e dispara o MILP
-        self._tarefa_ativa = (fornecedor, cliente)
+        # ATUALIZAÇÃO: Armazena o RAW completo ('ID:F,C') como tarefa ativa para rastreamento exclusivo.
+        self._tarefa_ativa = raw
         # Registra localmente AGORA, sem depender do callback (para segurança extra)
         self._claimed_tasks.add(raw) 
 
@@ -1242,8 +1288,8 @@ class VANTInstance:
         Tenta aplicar o evento 'ev'. Retorna True se transicionou, False caso contrário.
         Recebe string como entrada, converte para objeto Event internamente.
 
-        Atualizado: Se a transição aplicada for um evento de LIBERAÇÃO ou de FIM DE SERVIÇO
-        (progresso) e houver uma tarefa ativa, dispara um novo MILP (receding horizon).
+        Atualizado: Se a transição aplicada for um evento Controlável ou de Progresso/Liberação,
+        e houver uma tarefa ativa, dispara um novo MILP (receding horizon).
         """
         if not self._should_process(ev):
             return False
@@ -1265,8 +1311,17 @@ class VANTInstance:
 
         for (q, e, d) in self._trs_id:
             if str(q) == s and e == event_obj:
+                # O estado é atualizado AQUI.
                 self._state = d
                 transicionou = True
+                
+                # NOVO: Se o estado mudou, o tempo de entrada DEVE ser atualizado
+                if self.enable_ros:
+                    import rospy
+                    self.last_state_entry_time = rospy.get_time()
+                else:
+                    self.last_state_entry_time = time.time()
+                
                 if self.enable_ros:
                     self._publish_ros()
                 break
@@ -1277,23 +1332,30 @@ class VANTInstance:
         # ------------------ GATILHO DE REPLANEJAMENTO (MPC) ------------------
         should_replan = False
         
-        # 1. Eventos de Liberação (libera_*)
-        if ev.startswith("libera_"):
+        # NOVO: 1. Qualquer evento Controlável (Decisão do VANT)
+        if is_controllable(event_obj):
             should_replan = True
             
-        # 2. Eventos de Fim de Serviço (fim_trabalho_*) - Inclui não-controláveis
-        elif ev.startswith("fim_trabalho_"):
+        # 2. Eventos de Fim de Serviço/Liberação (Progresso Não-Controlável)
+        elif ev.startswith("libera_") or ev.startswith("fim_trabalho_") or ev.startswith("fim_carregar_"):
             should_replan = True
-        
-        # 3. Outros eventos de progresso relevantes (ex: fim_carregamento_*)
+
+        # 3. Outros eventos de progresso relevantes (opcional)
         # elif ev.startswith("fim_carregamento_"):
         #     should_replan = True
-
-        if self._tarefa_ativa is not None and should_replan:
+            
+        # O MILP só é útil se houver uma tarefa ativa e se o VANT ainda não terminou a missão
+        is_task_finished = self.terminou[0] and self.terminou[1] and self.terminou[2]
+            
+        if self._tarefa_ativa is not None and should_replan and not is_task_finished:
             import threading
             import rospy
 
-            rospy.loginfo(f"[{self.name}] Evento de progresso '{ev}' aplicado. Replanejando (novo MILP) para tarefa ativa {self._tarefa_ativa}.")
+            # 1. ATUALIZA CUSTOS DINÂMICOS PARA O NOVO ESTADO
+            # Garante que o MILP use a penalidade/incentivo corretos (persistência no NOVO estado).
+            self._update_dynamic_cost() 
+            
+            rospy.loginfo(f"[{self.name}] Evento de progresso/controlável '{ev}' aplicado. Replanejando (novo MILP) para tarefa ativa {self._tarefa_ativa}.")
 
             with self._milp_thread_lock:
                 if self._milp_thread is None or not self._milp_thread.is_alive():
@@ -1303,9 +1365,12 @@ class VANTInstance:
                     )
                     self._milp_thread.start()
 
+        elif self._tarefa_ativa is not None and is_task_finished:
+            # Se a transição levou ao estado de 'terminou' e a tarefa está ativa, completa a missão
+            self._complete_current_task()
+
         # ---------------------------------------------------------------------
         return True
-
 
     def _run_milp_for_current_task(self):
         """
@@ -1322,17 +1387,26 @@ class VANTInstance:
 
         import rospy
         from std_msgs.msg import String
+        
+        # NOVO: Verificação Rápida de Conclusão/Ausência de Tarefa
+        if self._tarefa_ativa is None:
+            rospy.loginfo(f"[{self.name}] Tentativa de MILP sem tarefa ativa. Abortando.")
+            return
 
         if self.terminou[0] and self.terminou[1] and self.terminou[2]: 
             self._complete_current_task()
             return
+        # FIM NOVO
+
+        tarefa_completa = self._tarefa_ativa
 
         # Se não há tarefa ativa, não há o que otimizar
-        if self._tarefa_ativa is None:
-            return
+        # REMOVIDO: (já verificado no início)
+        # if self._tarefa_ativa is None:
+        #     return
 
-        tarefa = self._tarefa_ativa
-        fornecedor, cliente = tarefa
+        tarefa, nodes_raw = tarefa_completa.split(":", 1)
+        fornecedor, cliente = nodes_raw.split(",")
 
         try:
             # Horizonte
@@ -1375,8 +1449,8 @@ class VANTInstance:
             # Estado atual do supervisor (id-específico)
             estado_inicial = self._state
 
-            # Dicionário de custos vem do modelo genérico
-            cost_dict = getattr(self.model, "dicionario_custos_supervisor", {})
+            # Dicionário de custos dinâmicos (AGORA ATUALIZADO PELO step() antes de chamar esta função)
+            cost_dict = self.dynamic_cost_dict
 
             rospy.loginfo(f"[{self.name}] Iniciando MILP para tarefa {tarefa} com H={H}. Proibidos (ID): {eventos_proibidos_id}")
 
@@ -1396,20 +1470,44 @@ class VANTInstance:
             # Eventos habilitados no estado atual (id-específicos)
             enabled = set(self.enabled_events())
 
+            # -------------------- LÓGICA DE SELEÇÃO DE EVENTOS (ATUALIZADA) --------------------
             selected = None
+            
+            # Itera pela sequência, buscando o primeiro evento controlável habilitado
             for ev_name in event_seq:
-                if ev_name in enabled:
-                    ev_obj = self._event_objects.get(ev_name)
-                    # Garante que é evento controlável
-                    if ev_obj is not None and is_controllable(ev_obj):
+                ev_obj = self._event_objects.get(ev_name)
+                
+                if ev_obj is None:
+                    continue # Ignora eventos desconhecidos
+                    
+                # 1. Deve ser Controlável (Ação do VANT)
+                if is_controllable(ev_obj):
+                    
+                    # 2. Deve estar Habilitado no estado atual (Supervisor permite)
+                    if ev_name in enabled:
                         selected = ev_name
+                        
+                        # 3. Atualização do Progresso (Terminou)
                         if selected == f"comeca_trabalho_{fornecedor}_{self.id}":
                             self.terminou[0]=True
                         if selected == f"comeca_trabalho_{cliente}_{self.id}":
                             self.terminou[1]=True
                         if len(volta)>0 and selected in volta:
                             self.terminou[2]=True
+                        
+                        break # Encontramos a primeira ação controlável habilitada
+                        
+                    else:
+                        # Se o evento controlável NÃO está habilitado, é uma falha de planejamento/modelo.
+                        # Devemos parar a busca.
+                        rospy.logwarn(f"[{self.name}] MILP sugeriu evento controlável '{ev_name}' que está desabilitado. Abortando busca na sequência.")
                         break
+
+                else:
+                    # O evento NÃO é controlável. Apenas ignoramos e buscamos a próxima ação do VANT.
+                    rospy.loginfo(f"[{self.name}] Ignorando evento não-controlável '{ev_name}' na sequência MILP e buscando a próxima ação do VANT.")
+                    continue # Continua o loop para buscar o próximo evento controlável
+            # -----------------------------------------------------------------------------------
 
             if selected is None:
                 rospy.logwarn(
@@ -1427,7 +1525,6 @@ class VANTInstance:
                 
         except Exception as e:
             rospy.logerr(f"[{self.name}] Erro executando MILP para tarefa {tarefa}: {e}")
-
 
     # --------------------------- ROS (opcional) ---------------------------
     def _publish_ros(self):

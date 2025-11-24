@@ -108,6 +108,7 @@ def _cb_event_with_move(inst, vant):
             return
 
         # 2. Lógica de Transição de Estado do Supervisor
+        # inst.step(ev) é chamado AQUI e dispara o MILP se for 'fim_carregar_*'
         if not inst.step(ev):
             # Evento não é deste VANT (id diferente, etc.) ou foi bloqueado pelo UTM
             return
@@ -128,7 +129,7 @@ def _cb_event_with_move(inst, vant):
                     label, coordinates = coord_entry
                     original_x, original_y = coordinates
 
-                    print(f"[DEBUG] label: {label}, x: {original_x}, y: {original_y}")
+                    # print(f"[DEBUG] label: {label}, x: {original_x}, y: {original_y}") # Removido Debug Print
 
                     if not isinstance(original_x, (int, float)) or not isinstance(original_y, (int, float)):
                         vant.ros_node.logerr(
@@ -225,6 +226,9 @@ def _cb_event_with_move(inst, vant):
                 vant.ros_node.logerr(
                     f"[{vant.name}] Erro ao processar recarga de bateria em '{ev_gen}': {e}"
                 )
+            
+            # NOVO: O MILP JÁ FOI DISPARADO POR inst.step() no início da função.
+            # Não é necessário um else/pass, apenas permitimos que a função termine.
 
         else:
             # Evento de controle (não-movimento)
@@ -235,7 +239,6 @@ def _cb_event_with_move(inst, vant):
             )
 
     return callback
-
 
 def resolve_grafo_path(rel="graph/sistema_logistico/grafo_recortado.txt"):
     try:
