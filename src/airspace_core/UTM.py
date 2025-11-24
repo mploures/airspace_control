@@ -2,6 +2,7 @@ import networkx as nx
 import os, sys, re 
 import threading
 from typing import Dict, Any, Tuple, List, Set, Union
+from collections import deque
 import rospy
 from std_msgs.msg import String
 
@@ -321,42 +322,68 @@ class UTMROSInterface:
         self.supervisor = self.utm_model.supervisor_mono
         self.eventos_proibidos_estado = self.utm_model.eventos_proibidos_estado
         self.name = node_name
-        self.num_agent = num_agent
+        self.num_agent = num_agent 
+
+        # NOVO: Contador para gerar IDs de tarefa sequenciais (ex: Tarefa_1, Tarefa_2)
+        self.task_counter = 0
+
+        # Controle de tarefas
+        # A fila agora guarda TUPLE: (ID_COMPLETO_TAREFA, NÓS_RAW) 
+        # Ex: ('Tarefa_1:F0,C0', 'F0,C0')
+        self.task_queue: deque[Tuple[str, str]] = deque() 
+        self.active_task_agents: Set[int] = set()  # agentes com tarefa ativa (ID do agente)
+        self.task_lock = threading.Lock()     # lock para acesso à fila/conjunto
         
         # Estado individual de cada agente no supervisor monolítico
         self.agent_states = self.utm_model.agent_state 
         self.state_lock = threading.Lock() # Para acesso seguro ao estado
         
-        # O mapa de eventos factíveis é útil para calcular o que é "permitido"
         self._factible_events_map = self._get_factible_events_map(self.supervisor)
-        
         self.generic_event_objects = self.utm_model.eventos
         
         # ---------------- 2. Inicialização e Canais ROS ----------------
         rospy.init_node(self.name, anonymous=False)
 
         # 1. Publicadores
-        # Publica estado (formato: "state1-||-state2-||-...")
         self.pub_state        = rospy.Publisher(f"/{self.name}/state", String, queue_size=10, latch=True) 
-        # Publica eventos proibidos globais (APENAS BLOQUEIOS GENÉRICOS)
         self.pub_global_prohibited = rospy.Publisher("/eventos_proibidos", String, queue_size=10, latch=True)
-        
-        # Publica tarefas (repassando)
-        self.pub_tarefas      = rospy.Publisher("/tarefas", String, queue_size=10)
-        
-        # Publica eventos HABILITADOS (Permitidos) - para compatibilidade com AutomatonNode
+        # Este é o canal que o VANTs escutam, com o formato ID:F,C
+        self.pub_tarefas      = rospy.Publisher("/tarefas", String, queue_size=10) 
         self.pub_events = rospy.Publisher(f"/{self.name}/possible_events", String, queue_size=10, latch=True)
         self.pub_enabled_events = rospy.Publisher(f"/{self.name}/enabled_events", String, queue_size=10, latch=True)
         self.pub_marked = rospy.Publisher(f"/{self.name}/is_marked", String, queue_size=10, latch=True)
 
         # 2. Subscribers
         self.sub_event        = rospy.Subscriber("/event", String, self._on_event, queue_size=50)
+        # Este canal recebe o formato simples F,C
         self.sub_tarefas_afazer = rospy.Subscriber("/tarefas_afazer", String, self._on_tarefa_afazer, queue_size=10)
 
         rospy.sleep(0.5)
         self._publish_state() # Publica o estado inicial
 
     # ---------------- 3. Callbacks ROS (Entrada) ----------------
+
+    def _dispatch_next_tasks_if_possible(self):
+        """
+        Envia tarefas da fila /tarefas_afazer para /tarefas,
+        RESPEITANDO o limite de UVs com tarefa ativa.
+        PUBLICA a tarefa no formato ID_TAREFA:FORNECEDOR,CLIENTE.
+        """
+        with self.task_lock:
+            # Disponível: Slots totais (num_agent) - Agentes ativos
+            available_slots = self.num_agent - len(self.active_task_agents)
+            
+            while available_slots > 0 and self.task_queue:
+                # item_fila é (ID_COMPLETO, NÓS_RAW)
+                tarefa_completa, _nodes_raw = self.task_queue.popleft()
+                
+                self.pub_tarefas.publish(String(data=tarefa_completa))
+                rospy.loginfo(
+                    f"[{self.name}] Tarefa despachada para a frota: '{tarefa_completa}'. "
+                    f"Tarefas ativas (aceitas) atuais: {len(self.active_task_agents)}/{self.num_agent}"
+                )
+                # Diminui o contador de slots disponíveis (embora só conte quando for aceita)
+                available_slots -= 1 
 
     def _extract_event_info(self, ev_with_id: str) -> Tuple[str, Union[int, None]]:
         """
@@ -371,8 +398,9 @@ class UTMROSInterface:
 
     def _on_event(self, msg):
         """
-        Recebe eventos do barramento /event (com ID) e tenta aplicá-los 
-        no estado específico do agente no supervisor monolítico.
+        Recebe eventos do barramento /event (com ID) e:
+        - Atualiza contagem de tarefas aceitas/encerradas (tarefa_aceita_*, tarefa_encerrada_*)
+        - Aplica eventos genéricos no supervisor monolítico (quando fizer sentido).
         """
         ev_with_id = str(msg.data or "").strip()
         if not ev_with_id:
@@ -380,39 +408,111 @@ class UTMROSInterface:
 
         generic_name, agent_id = self._extract_event_info(ev_with_id)
         
+        # --- 0. Ping ---
         if generic_name == "ping":
             rospy.loginfo(f"[{self.name}] Ping recebido — republishing state and events.")
             self._publish_state()
             return
-            
-        # 1. Checagem e Recuperação do Objeto Evento GENÉRICO
-        # O supervisor monolítico tem transições em eventos GENÉRICOS
+
+        # --- 1. Eventos de TAREFA  ---
+        if generic_name.startswith("tarefa_aceita_"):
+            # Agente aceitou uma tarefa -> conta como tarefa ativa
+            if agent_id is not None:
+                with self.task_lock:
+                    # Garante que o número de tarefas ativas nunca ultrapassa num_agent
+                    if agent_id not in self.active_task_agents:
+                        if len(self.active_task_agents) < self.num_agent:
+                            self.active_task_agents.add(agent_id)
+                            rospy.loginfo(
+                                f"[{self.name}] ✅ tarefa_aceita por agente {agent_id}. "
+                                f"Tarefas ativas: {len(self.active_task_agents)}/{self.num_agent}"
+                            )
+                        else:
+                            rospy.logwarn(
+                                f"[{self.name}] ⚠️ tarefa_aceita_{agent_id} excederia o limite de "
+                                f"{self.num_agent} tarefas ativas. Ignorando para contagem interna."
+                            )
+                    else:
+                        rospy.loginfo(
+                            f"[{self.name}] tarefa_aceita_{agent_id} recebida, "
+                            "mas agente já constava com tarefa ativa."
+                        )
+            return  
+
+        if generic_name.startswith("tarefa_encerrada_"):
+            # Agente terminou a tarefa -> libera slot e tenta despachar outra
+            if agent_id is not None:
+                is_removed = False
+                with self.task_lock:
+                    if agent_id in self.active_task_agents:
+                        self.active_task_agents.remove(agent_id)
+                        is_removed = True
+                        rospy.loginfo(
+                            f"[{self.name}] ✅ tarefa_encerrada por agente {agent_id}. "
+                            f"Slot liberado. Tarefas ativas: {len(self.active_task_agents)}/{self.num_agent}"
+                        )
+                    else:
+                        rospy.loginfo(
+                            f"[{self.name}] tarefa_encerrada_{agent_id} recebida, "
+                            "mas agente não constava com tarefa ativa."
+                        )
+                
+                # Depois de liberar slot, tenta despachar nova tarefa
+                if is_removed:
+                    # Chamar fora do lock para evitar deadlocks caso o despacho se complexifique
+                    self._dispatch_next_tasks_if_possible()
+            return  
+
+
         ev_obj = self.generic_event_objects.get(generic_name)
         
+        # --- 2. Lógica do Supervisor DES ---
         if ev_obj is None or agent_id is None or agent_id < 1 or agent_id > self.num_agent:
-            # Ignora eventos desconhecidos, sem ID ou de IDs inválidos
             return
             
         agent_idx = agent_id - 1
         
         with self.state_lock:
             current_state = self.agent_states[agent_idx]
-            # Busca a transição com o objeto Event GENÉRICO
             next_state = self._get_next_state(current_state, ev_obj)
             
             if next_state is not None:
                 rospy.loginfo(f"[{self.name}] Transição Agente {agent_id}: {current_state} --{generic_name}--> {next_state}")
-                
-                # 2. Atualiza o estado do agente (somente do ID que publicou)
                 self.agent_states[agent_idx] = next_state
                 self._publish_state()
 
     def _on_tarefa_afazer(self, msg):
-        """Recebe tarefas a serem feitas e as re-publica no canal /tarefas para a frota arbitrar."""
-        tarefa_raw = str(msg.data or "").strip()
-        if tarefa_raw:
-            rospy.loginfo(f"[{self.name}] Tarefa a fazer recebida. Repassando para a frota: {tarefa_raw}")
-            self.pub_tarefas.publish(String(data=tarefa_raw))
+        """
+        Recebe tarefas a serem feitas (formato: F,C), GERA um ID, e:
+        - Enfileira no formato ID:F,C em self.task_queue
+        - Tenta despachar para a frota respeitando o limite de tarefas ativas.
+        """
+        # Formato esperado: "F0,C0"
+        nodes_raw = str(msg.data or "").strip()
+        if not nodes_raw:
+            return
+
+        # Verificação básica de formato (deve conter uma vírgula)
+        if "," not in nodes_raw:
+            rospy.logwarn(f"[{self.name}] Tarefa recebida em /tarefas_afazer com formato inválido (sem vírgula): {nodes_raw}")
+            return
+            
+        # Geração de ID e enfileiramento ATÔMICO
+        with self.task_lock:
+            # 1. Incrementa o contador de tarefas
+            self.task_counter += 1
+            task_id = f"Tarefa_{self.task_counter}"
+            
+            # 2. Cria a string no formato completo para o VANT
+            tarefa_completa = f"{task_id}:{nodes_raw}"
+            
+            rospy.loginfo(f"[{self.name}] Nova Tarefa recebida. ID Gerado: {task_id}. Enfileirando: {tarefa_completa}")
+            
+            # 3. Enfileira a tupla (ID_COMPLETO, NÓS_RAW)
+            self.task_queue.append((tarefa_completa, nodes_raw))
+        
+        # Tenta despachar a partir da fila (se houver slot livre)
+        self._dispatch_next_tasks_if_possible()
         
     # ---------------- 4. Lógica do Supervisor DES ----------------
     
@@ -427,7 +527,6 @@ class UTMROSInterface:
 
     def _get_next_state(self, current_state: Any, event_obj: Any) -> Any:
         """Busca o próximo estado no autômato supervisor monolítico."""
-        # Itera sobre as transições do supervisor
         for q, e, d in transitions(self.supervisor):
             if q == current_state and e == event_obj:
                 return d
@@ -442,10 +541,8 @@ class UTMROSInterface:
         
         with self.state_lock:
             for agent_state in self.agent_states:
-                # Recupera os eventos proibidos (objetos Event)
                 events_prohibited_for_state = self.eventos_proibidos_estado.get(agent_state, set())
                 
-                # Adiciona o nome (str) de todos os eventos proibidos deste estado ao conjunto global
                 for ev_obj in events_prohibited_for_state:
                     global_prohibited.add(str(ev_obj))
 
@@ -455,7 +552,6 @@ class UTMROSInterface:
         """
         Calcula os eventos HABILITADOS (Factíveis - Proibidos).
         """
-        # 1. União dos Eventos Factíveis em TODOS os estados dos agentes.
         all_factible_agent_events: Set[str] = set()
         with self.state_lock:
             for agent_state in self.agent_states:
@@ -463,10 +559,8 @@ class UTMROSInterface:
                 for ev_obj in factible_events:
                     all_factible_agent_events.add(str(ev_obj))
         
-        # 2. Eventos Proibidos Globais
         global_prohibited = self._get_global_prohibited_events()
         
-        # 3. Eventos Habilitados (Events Habilitados = Factíveis - Proibidos)
         enabled_events = all_factible_agent_events.difference(global_prohibited)
         
         return enabled_events
@@ -484,49 +578,39 @@ class UTMROSInterface:
         return bloqueios
 
 
-    # ---------------- 5. Publicação ROS (Saída) ----------------
+    # ---------------- 5. Publicação ROS (Saída - Inalterada) ----------------
 
     def _publish_state(self):
         """Publica o estado atual, a lista global de eventos proibidos e os eventos de bloqueio de nó."""
         
         # --- 1. Publica o Estado dos Agentes ---
         state_strs = [str(s) for s in self.agent_states]
-        state_str = "Estado"
-        self.pub_state.publish(state_str)
+        state_str = "-||-".join(state_strs)
+        self.pub_state.publish(String(data=state_str))
         rospy.loginfo(f"[{self.name}] Estados dos Agentes Publicados: {state_str}")
         
         # --- 2. Calcula Eventos Proibidos Globais ---
         global_prohibited = self._get_global_prohibited_events()
         global_str = ",".join(sorted(global_prohibited))
         
-        # Publica no canal /eventos_proibidos todos os eventos genéricos proibidos
-        self.pub_global_prohibited.publish(global_str)
+        self.pub_global_prohibited.publish(String(data=global_str))
         rospy.loginfo(f"[{self.name}] Eventos PROIBIDOS Globais Publicados em /eventos_proibidos: {global_str}")
 
-
-        # Publica no canal /block_events (se houver um consumidor específico)
-
-        # --- 4. Publica Eventos Habilitados (Permitidos) para Compatibilidade com AutomatonNode ---
+        # --- 3. Publica Eventos Habilitados (Permitidos) ---
         enabled_events = self._get_enabled_events()
         blocking_events = self._get_blocking_events_filtered(enabled_events)
         enabled_str = ",".join(sorted(blocking_events))
 
-        # Publica para que o painel e outros nós saibam o que pode ocorrer
-        self.pub_events.publish(enabled_str) 
-        self.pub_enabled_events.publish(enabled_str)
+        self.pub_events.publish(String(data=enabled_str)) 
+        self.pub_enabled_events.publish(String(data=enabled_str))
         rospy.loginfo(f"[{self.name}] Eventos Habilitados (Permitidos) Publicados: {enabled_str}")
 
-        # --- 5. Estado Marcado ---
-        self.pub_marked.publish("False")
+        # --- 4. Estado Marcado ---
+        self.pub_marked.publish(String(data="False"))
 
 
     def run(self):
         """Loop principal do nó."""
         rospy.spin()
-
-
-
-
-
 
 
