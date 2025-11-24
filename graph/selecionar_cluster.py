@@ -8,6 +8,7 @@ import bisect
 import numpy as np
 import matplotlib.pyplot as plt
 from collections import defaultdict
+import random 
 
 
 # ===========================
@@ -26,24 +27,20 @@ def ler_pares_xy(arquivo):
             pts.append((int(x), int(y)))
     return pts
 
-
 # ===========================
 # Utilidades geométricas
 # ===========================
 def distancia(p, q):
     return math.hypot(p[0] - q[0], p[1] - q[1])
 
-
 def orient(a, b, c):
     return (b[1] - a[1]) * (c[0] - b[0]) - (b[0] - a[0]) * (c[1] - b[1])
-
 
 def on_segment(a, b, c):
     return (
         min(a[0], b[0]) <= c[0] <= max(a[0], b[0])
         and min(a[1], b[1]) <= c[1] <= max(a[1], b[1])
     )
-
 
 def segmentos_cruzam(p1, p2, p3, p4):
     o1 = orient(p1, p2, p3)
@@ -66,10 +63,8 @@ def segmentos_cruzam(p1, p2, p3, p4):
 
     return False
 
-
 def dentro_ret(p, x1, y1, x2, y2):
     return (x1 < p[0] < x2) and (y1 < p[1] < y2)
-
 
 # ===========================
 # Malha H/V a partir dos cruzamentos
@@ -113,7 +108,6 @@ def construir_malha_planar(cruzamentos):
 
     return nodes, adj, xs_by_y, ys_by_x
 
-
 # ===========================
 # Imagem integral (contagem O(1))
 # ===========================
@@ -126,14 +120,14 @@ def integral_from_points(points, H, W):
     ii[1:, 1:] = np.cumsum(np.cumsum(grid, axis=0), axis=1)
     return ii
 
-
 def rect_count(ii, x1, y1, x2, y2):
     if x1 > x2:
         x1, x2 = x2, x1
     if y1 > y2:
         y1, y2 = y2, y1
+    # Adicionamos +1 a x2 e y2 para incluir as coordenadas (x2, y2)
+    # Note que a imagem integral ii tem dimensões (H+1, W+1)
     return int(ii[y2 + 1, x2 + 1] - ii[y1, x2 + 1] - ii[y2 + 1, x1] + ii[y1, x1])
-
 
 # ===========================
 # Enumeração de retângulos viáveis
@@ -169,6 +163,8 @@ def listar_retangulos(
                         continue
 
                     c1, c2, c3, c4 = (x1, y1), (x2, y1), (x2, y2), (x1, y2)
+                    # Verifica se os quatro cantos SÃO NÓS LOGICOS. 
+                    # Isso garante que a malha H/V "alcance" os limites do retângulo.
                     if (
                         c1 in nodes_set
                         and c2 in nodes_set
@@ -181,7 +177,7 @@ def listar_retangulos(
 
 
 # ===========================
-# Atribuição de tipos (farthest-first)
+# Atribuição de tipos 
 # ===========================
 def atribuir_tipos(construcoes_roi, N_V, N_E, N_F, N_C, dist_min=0):
     pts = construcoes_roi[:]
@@ -196,15 +192,27 @@ def atribuir_tipos(construcoes_roi, N_V, N_E, N_F, N_C, dist_min=0):
     def pick():
         if not pts:
             return None
-        if not selecionados:
-            return pts.pop(0)
-        best, bestd = None, -1
-        for c in pts:
-            d = min(distancia(c, q) for _, q in selecionados) if selecionados else 1e9
-            if d > bestd:
-                bestd, best = d, c
-        pts.remove(best)
-        return best
+        
+        # ----------------------------------------------------
+        # ALTERAÇÃO: Seleção ALEATÓRIA em vez de Farthest-First
+        # ----------------------------------------------------
+        
+        # 1. Filtra os pontos restantes que SÃO VÁLIDOS (respeitam dist_min)
+        pts_validos = [p for p in pts if valido(p)]
+        
+        if not pts_validos:
+            # Não há pontos restantes que respeitem a distância mínima
+            return None
+        
+        # 2. Escolhe um ponto aleatório entre os válidos
+        p = random.choice(pts_validos)
+        
+        # 3. Remove o ponto selecionado da lista principal de pontos
+        pts.remove(p)
+        return p
+        
+        # ----------------------------------------------------
+
 
     saida = []
     for tipo, N in [
@@ -214,19 +222,24 @@ def atribuir_tipos(construcoes_roi, N_V, N_E, N_F, N_C, dist_min=0):
         ("CLIENTE", N_C),
     ]:
         for _ in range(N):
-            p = pick()
-            if p is not None and valido(p):
+            # A chamada a pick() agora já garante que o ponto é válido quanto a dist_min
+            p = pick() 
+            if p is not None:
+                # O teste 'valido(p)' dentro do loop principal é tecnicamente redundante 
+                # se 'pick' já filtra, mas mantemos o mínimo de alteração na estrutura
+                # do loop 'for' para não causar problemas.
                 selecionados.append((tipo, p))
                 saida.append((tipo, p))
+            # Se pick() retorna None, significa que não há mais pontos disponíveis
+            # ou nenhum ponto restante respeita a dist_min. O loop continua para o próximo tipo.
+            
     return saida
-
 
 # ===========================================================
 # CONEXÃO DIAGONAL: especial -> vértices da célula que o contém
 # ===========================================================
 def _norm_edge(u, v):
     return tuple(sorted((u, v)))
-
 
 def _bracketing(sorted_vals, val):
     """Retorna (low, high) vizinhos adjacentes que cercam 'val' (ou (None,None))."""
@@ -238,7 +251,6 @@ def _bracketing(sorted_vals, val):
     if not (low < val < high):
         return None, None
     return low, high
-
 
 def conectar_especial_por_diagonais(p, grid_xs, grid_ys, nodes_set, edges_set):
     """
@@ -287,7 +299,6 @@ def conectar_especial_por_diagonais(p, grid_xs, grid_ys, nodes_set, edges_set):
 
     return conexoes
 
-
 # ===========================
 # Montagem do grafo
 # ===========================
@@ -311,7 +322,10 @@ def montar_grafo(nodes_roi, edges_roi, pontos_atribuidos, conexoes_especiais):
 
     # adiciona conexões especiais (podem ser múltiplas por especial)
     for (p, n) in conexoes_especiais:
-        id_log = idmap[n]
+        id_log = idmap.get(n) # usar .get para garantir que 'n' está no idmap (no BBox final)
+        if id_log is None:
+            continue 
+            
         id_esp = None
         for k, v in grafo.items():
             if v["tipo"] != "LOGICO" and v["posicao"] == p:
@@ -326,11 +340,11 @@ def montar_grafo(nodes_roi, edges_roi, pontos_atribuidos, conexoes_especiais):
 
     return grafo
 
-
 # ===========================
 # Desenho
 # ===========================
-def desenhar_grafo_mapa(imagem_path, ret, grafo, output_path, raio=8):
+def desenhar_grafo_mapa(imagem_path, ret, grafo, output_path):
+    raio=20
     img = None
     if imagem_path and os.path.exists(imagem_path):
         img = cv2.imread(imagem_path)
@@ -376,13 +390,13 @@ def desenhar_grafo_mapa(imagem_path, ret, grafo, output_path, raio=8):
             seen.add(e)
             p1 = adj(grafo[u]["posicao"])
             p2 = adj(grafo[v]["posicao"])
-            cv2.line(img, p1, p2, (0, 0, 0), 30)
+            cv2.line(img, p1, p2, (0, 0, 0), 20) 
 
     # nós
     for nid, info in grafo.items():
         x, y = adj(info["posicao"])
         cor = cores[info["tipo"]]
-        cv2.circle(img, (int(x), int(y)), 4*raio, cor, -1)
+        cv2.circle(img, (int(x), int(y)), raio, cor, -1)
 
 
     if output_path:
@@ -391,15 +405,12 @@ def desenhar_grafo_mapa(imagem_path, ret, grafo, output_path, raio=8):
 
     return img
 
-
 def salvar_grafo_txt(grafo, output_path):
     with open(output_path, "w", encoding="utf-8") as f:
         f.write("tipo_do_no,label,posicao,labels_dos_nos_conectados\n")
         for node_id, info in grafo.items():
             x, y = info["posicao"]
             f.write(f"{info['tipo']},{node_id},({x},{y}),{','.join(info['conexoes'])}\n")
-
-
 # ===========================
 # Função principal
 # ===========================
@@ -430,13 +441,14 @@ def criar_sistema_logistico(
     else:
         xs = [x for x, _ in cruzamentos + construcoes]
         ys = [y for _, y in cruzamentos + construcoes]
-        W = max(xs) + dist_minima_borda + 1
-        H = max(ys) + dist_minima_borda + 1
+        # Adiciona margem para W e H
+        W = max(xs) + dist_minima_borda * 2 + 1 
+        H = max(ys) + dist_minima_borda * 2 + 1
 
     # 1) malha planar H/V
     nodes, adj, xs_by_y, ys_by_x = construir_malha_planar(cruzamentos)
 
-    # 2) retângulos e escolha do melhor
+    # 2) retângulos viáveis e escolha do melhor (menor área que atende a demanda)
     rects = listar_retangulos(
         nodes,
         xs_by_y,
@@ -451,28 +463,110 @@ def criar_sistema_logistico(
         return None
 
     ii = integral_from_points(construcoes, H, W)
-    demanda = 2 * (N_VERTIPORT + N_ESTACAO + N_FORNECEDOR + N_CLIENTE)
+    demanda = N_VERTIPORT + N_ESTACAO + N_FORNECEDOR + N_CLIENTE # Demanda é o total de pontos a serem alocados (não o dobro)
 
-    melhor, area_best = None, 1 << 62
+    melhor_rect_inicial, area_best = None, float('inf')
     for (x1, y1, x2, y2) in rects:
         cnt = rect_count(ii, x1, y1, x2, y2)
         if cnt >= demanda:
             area = (x2 - x1) * (y2 - y1)
             if area < area_best:
                 area_best = area
-                melhor = (x1, y1, x2, y2)
+                melhor_rect_inicial = (x1, y1, x2, y2)
 
-    if melhor is None:
-        print("ERRO: nenhum retângulo atende à capacidade mínima.")
+    if melhor_rect_inicial is None:
+        print("ERRO: nenhum retângulo atende à capacidade mínima de construções.")
         return None
 
-    roi = melhor
-    x1, y1, x2, y2 = roi
-    print(f"ROI selecionada: {roi} área={area_best}")
+    roi_inicial = melhor_rect_inicial
+    x1, y1, x2, y2 = roi_inicial
+    # print(f"ROI inicial (mínima área c/ cantos na malha): {roi_inicial} área={area_best}")
 
-    # 3) subgrafo lógico no ROI
-    nodes_roi = set([n for n in nodes if (x1 <= n[0] <= x2 and y1 <= n[1] <= y2)])
 
+    # 3) subgrafo lógico no ROI INICIAL (e seleção das construções)
+    nodes_roi_inicial = set([n for n in nodes if (x1 <= n[0] <= x2 and y1 <= n[1] <= y2)])
+    
+    # 4) escolhe construções na ROI inicial e atribui tipos (usando a capacidade mínima do retângulo)
+    construcoes_roi_inicial = [p for p in construcoes if (x1 <= p[0] <= x2 and y1 <= p[1] <= y2)]
+    pts_atribuidos = atribuir_tipos(
+        construcoes_roi_inicial,
+        N_VERTIPORT,
+        N_ESTACAO,
+        N_FORNECEDOR,
+        N_CLIENTE,
+        dist_min=dist_minima_pontos,
+    )
+    
+    
+    # 3.1) ALTERAÇÃO PRINCIPAL: REDEFINIR ROI para o Bounding Box (BBox) mínimo
+    # Contendo todos os NÓS LÓGICOS E PONTOS ESPECIAIS contidos no ROI inicial.
+    
+    # NÓS LÓGICOS E PONTOS ESPECIAIS NA ROI FINAL
+    todos_pontos_necessarios = list(nodes_roi_inicial) + [p for _, p in pts_atribuidos]
+
+    if not todos_pontos_necessarios:
+        print("ERRO: BBox mínima não pode ser definida (sem nós lógicos ou especiais).")
+        return None
+        
+    xs_necessarios = [p[0] for p in todos_pontos_necessarios]
+    ys_necessarios = [p[1] for p in todos_pontos_necessarios]
+
+    # O novo ROI (BBox) deve ser limitado pelos *cruzamentos* mais próximos para não ter "espaço em branco"
+    # A coordenada X do BBox final deve ser uma coordenada X de cruzamento
+    # A coordenada Y do BBox final deve ser uma coordenada Y de cruzamento
+    grid_xs = sorted(ys_by_x.keys())
+    grid_ys = sorted(xs_by_y.keys())
+    
+    # BBox: Xmin, Ymin, Xmax, Ymax
+    # Encontra o cruzamento X mais próximo e menor ou igual ao min(xs_necessarios)
+    # Encontra o cruzamento X mais próximo e maior ou igual ao max(xs_necessarios)
+    # E o mesmo para Y.
+    
+    # bisect_left acha o ponto de inserção. O elemento à esquerda é o floor, à direita é o ceil.
+    
+    # X1 (Mínimo): O maior x de cruzamento <= min(xs_necessarios)
+    i = bisect.bisect_right(grid_xs, min(xs_necessarios))
+    # Se i=0, significa que min(xs_necessarios) é menor que o menor cruzamento (problema de ROI inicial?)
+    # Se i > 0, grid_xs[i-1] é o maior X de cruzamento <= min(xs)
+    x_min_idx = i - 1 if i > 0 else 0
+    
+    # X2 (Máximo): O menor x de cruzamento >= max(xs_necessarios)
+    i = bisect.bisect_left(grid_xs, max(xs_necessarios))
+    # Se i=len(grid_xs), significa que max(xs_necessarios) é maior que o maior cruzamento.
+    # Se i < len(grid_xs), grid_xs[i] é o menor X de cruzamento >= max(xs)
+    x_max_idx = i if i < len(grid_xs) else len(grid_xs) - 1
+
+    # Y1 (Mínimo): O maior y de cruzamento <= min(ys_necessarios)
+    i = bisect.bisect_right(grid_ys, min(ys_necessarios))
+    y_min_idx = i - 1 if i > 0 else 0
+    
+    # Y2 (Máximo): O menor y de cruzamento >= max(ys_necessarios)
+    i = bisect.bisect_left(grid_ys, max(ys_necessarios))
+    y_max_idx = i if i < len(grid_ys) else len(grid_ys) - 1
+    
+    # Nova ROI ajustada
+    x1_final = grid_xs[x_min_idx]
+    x2_final = grid_xs[x_max_idx]
+    y1_final = grid_ys[y_min_idx]
+    y2_final = grid_ys[y_max_idx]
+    
+    # Garantir que min < max (pode acontecer se houver apenas um nó lógico em X ou Y)
+    if x1_final > x2_final: x1_final = x2_final
+    if y1_final > y2_final: y1_final = y2_final
+
+    roi = (x1_final, y1_final, x2_final, y2_final)
+    
+    # Recalcula os nós lógicos dentro da ROI FINAL
+    nodes_roi = set([n for n in nodes if (x1_final <= n[0] <= x2_final and y1_final <= n[1] <= y2_final)])
+    
+    if not nodes_roi:
+         # Isso só deve acontecer se a ROI inicial era inválida (p.ex. um ponto único)
+        print("AVISO: BBox final não contém nós lógicos da malha. Usando ROI inicial.")
+        nodes_roi = nodes_roi_inicial
+        roi = roi_inicial
+        x1_final, y1_final, x2_final, y2_final = roi
+
+    # Atualiza as arestas e grids para o novo ROI final
     edges_set = set()
     for u in nodes_roi:
         for v in adj.get(u, []):
@@ -480,34 +574,30 @@ def criar_sistema_logistico(
                 edges_set.add(_norm_edge(u, v))
 
     # grids ordenados do ROI (para localizar células)
-    grid_xs = sorted({n[0] for n in nodes_roi})
-    grid_ys = sorted({n[1] for n in nodes_roi})
+    grid_xs_final = sorted({n[0] for n in nodes_roi})
+    grid_ys_final = sorted({n[1] for n in nodes_roi})
     nodes_set = set(nodes_roi)
 
-    # 4) escolhe construções na ROI e atribui tipos
-    construcoes_roi = [p for p in construcoes if (x1 <= p[0] <= x2 and y1 <= p[1] <= y2)]
-    pts_atribuidos = atribuir_tipos(
-        construcoes_roi,
-        N_VERTIPORT,
-        N_ESTACAO,
-        N_FORNECEDOR,
-        N_CLIENTE,
-        dist_min=dist_minima_pontos,
-    )
+    # print(f"ROI FINAL (BBox mínima): {roi} área={(x2_final - x1_final) * (y2_final - y1_final)}")
+
 
     # 5) ligar cada especial às **quatro** quinas (duas diagonais) da célula
     conexoes_especiais = []
     for tipo, p in pts_atribuidos:
-        if not dentro_ret(p, x1, y1, x2, y2):
+        # Verifica se o ponto especial ainda está DENTRO OU NAS BORDAS do ROI final
+        if not (x1_final <= p[0] <= x2_final and y1_final <= p[1] <= y2_final):
+            # Não deveria acontecer se o BBox foi calculado corretamente
             continue
-        conns = conectar_especial_por_diagonais(p, grid_xs, grid_ys, nodes_set, edges_set)
+            
+        conns = conectar_especial_por_diagonais(p, grid_xs_final, grid_ys_final, nodes_set, edges_set)
         if conns:
             conexoes_especiais.extend(conns)
         else:
-            print(f"AVISO: {tipo} em {p} não conseguiu conectar por diagonais sem violar regras.")
+            print(f"AVISO: {tipo} em {p} não conseguiu conectar por diagonais sem violar regras no ROI final.")
 
     # 6) grafo final e saídas
     edges_roi = list(edges_set)  # apenas arestas H/V entre nós lógicos
+    # A função montar_grafo precisa usar o IDMAP dos nós LÓGICOS FINAIS
     grafo = montar_grafo(nodes_roi, edges_roi, pts_atribuidos, conexoes_especiais)
 
     img_mapa_out = os.path.join(output_dir, "grafo_sobre_mapa.png")
@@ -519,6 +609,7 @@ def criar_sistema_logistico(
     salvar_grafo_txt(grafo, grafo_txt)
 
     print("\n=== SISTEMA CRIADO (especiais conectados por DIAGONAIS às quinas) ===")
+    print(f"ROI selecionada: {roi} área={(x2_final - x1_final) * (y2_final - y1_final)}")
     print(f"Grafo sobre mapa: {img_mapa_out}")
     print(f"Grafo fundo branco: {img_branco_out}")
     print(f"Arquivo do grafo: {grafo_txt}")
@@ -532,12 +623,11 @@ def criar_sistema_logistico(
         "imagem_resultado": img_resultado,
     }
 
-
 # ---------------------------
 # Exemplo de uso direto
 # ---------------------------
 if __name__ == "__main__":
-    N_VERTIPORT, N_ESTACAO, N_FORNECEDOR, N_CLIENTE = 1, 1, 1, 1
+    N_VERTIPORT, N_ESTACAO, N_FORNECEDOR, N_CLIENTE = 1, 1, 2, 2
 
     res = criar_sistema_logistico(
         N_VERTIPORT,

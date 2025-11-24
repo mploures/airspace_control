@@ -205,6 +205,56 @@ def get_deposit_points_from_grafo(nodes):
             deps.append(info['pos'])
     return deps
 
+
+def estimate_free_radius(cx, cy, img, max_radius=120):
+                """
+                Estima um raio livre (em px) ao redor do centro (cx, cy),
+                varrendo em várias direções até encontrar obstáculo/borda.
+
+                Retorna um raio tal que os pontos gerados estejam,
+                em boa aproximação, "dentro do círculo" do vertiport.
+                """
+                Hh, Ww = img.shape[:2]
+
+                # Fora da imagem ou centro não-livre → sem raio confiável
+                if not (0 <= cx < Ww and 0 <= cy < Hh):
+                    return 0
+                if img[cy, cx] != 255:
+                    return 0
+
+                # Não extrapolar os limites da imagem
+                max_radius = min(
+                    max_radius,
+                    cx, cy,
+                    Ww - 1 - cx,
+                    Hh - 1 - cy
+                )
+                if max_radius <= 0:
+                    return 0
+
+                n_angles = 36
+                r_limit = max_radius
+                best = r_limit
+
+                for k in range(n_angles):
+                    ang = 2.0 * math.pi * k / n_angles
+                    r = 1
+                    while r <= max_radius:
+                        x = int(round(cx + r * math.cos(ang)))
+                        y = int(round(cy + r * math.sin(ang)))
+                        # Qualquer coisa que não seja branco é considerado "parede/borda"
+                        if x < 0 or x >= Ww or y < 0 or y >= Hh or img[y, x] != 255:
+                            best = min(best, r)
+                            break
+                        r += 1
+
+                # Se não encontramos nada, usa max_radius mesmo
+                if best == r_limit:
+                    return max_radius
+
+                # Margem de segurança para ficar bem dentro do círculo
+                return max(1, best - 2)
+
 def make_graph_and_wall_bitmaps(original_path, worlds_dir, W, H, border_frac=0.003):
     """
     - Binariza INVERTIDO: tudo que NÃO for branco -> BRANCO; branco -> PRETO.
@@ -269,7 +319,6 @@ def downscale_with_scale(src_path, worlds_dir, W, H, s):
     cv2.imwrite(out_path, resized)
     return out_name, newW, newH
 
-
 # -----------------------------
 # Leitura robusta dos pontos_* (fallback se não houver grafo)
 # -----------------------------
@@ -286,7 +335,6 @@ def read_points_txt(path):
                 pts.append((x, y))
     return pts
 
-
 # -----------------------------
 # Geometria / conversão de coords
 # -----------------------------
@@ -299,7 +347,6 @@ def to_stage_xy(px, py, W_px, H_px):
     """
     return float(px), float(H_px - py)
 
-
 def wrap_pi(a):
     while a <= -math.pi:
         a += 2 * math.pi
@@ -307,10 +354,8 @@ def wrap_pi(a):
         a -= 2 * math.pi
     return a
 
-
 def angdiff(a, b):
     return abs(wrap_pi(a - b))
-
 
 def r_bound_to_image(x0, y0, theta, W, H, sep):
     c, s = math.cos(theta), math.sin(theta)
@@ -322,7 +367,6 @@ def r_bound_to_image(x0, y0, theta, W, H, sep):
         ry = (H - sep - y0) / s if s > 0 else (y0 - sep) / (-s)
     r = min(rx, ry)
     return max(0.0, r)
-
 
 # -----------------------------
 # Paleta de cores (40+)
@@ -678,7 +722,7 @@ def main():
         force_align = False
         out_norm_path = os.path.join(os.path.dirname(grafo_path), 'grafo_recortado.txt')
         nodes_aligned, offset_used, scales_used, grafo_out_path = align_grafo_to_bitmap(
-            nodes_in, W_img=W, H_img=H,bitmap_img=graph_bw_img, out_path=out_norm_path, force=force_align
+            nodes_in, W_img=W, H_img=H, bitmap_img=graph_bw_img, out_path=out_norm_path, force=force_align
         )
         nodes = nodes_aligned
     else:
@@ -691,9 +735,9 @@ def main():
     assert (W_used, H_used) == (W2, H2), "downscale inconsistente entre grafo e muro"
 
     salvar_dimensoes_reais(worlds_dir, W_used, H_used, W, H, s)
+
     # 7) Posições: exatamente os "depósitos" (VERTIPORT quando não houver DEPOSITO).
     #    Agora usando o bitmap REDIMENSIONADO para verificação
-    
     placed_px = []
     if nodes:
         deposits = get_deposit_points_from_grafo(nodes)
@@ -712,7 +756,6 @@ def main():
                 x_resized = int(round(x * s))
                 y_resized = int(round(y * s))
                 deposits_resized.append((x_resized, y_resized))
-            
             deposits = deposits_resized
 
             # DEBUG: Mostrar informações sobre os depósitos encontrados
@@ -733,16 +776,65 @@ def main():
             safety_margin = args.sep_px
             min_sep = robot_d + safety_margin
 
+            def estimate_free_radius(cx, cy, img, max_radius=120):
+                """
+                Estima um raio livre (em px) ao redor do centro (cx, cy),
+                varrendo em várias direções até encontrar obstáculo/borda.
+
+                Retorna um raio tal que os pontos gerados estejam,
+                em boa aproximação, "dentro do círculo" do vertiport.
+                """
+                Hh, Ww = img.shape[:2]
+
+                # Fora da imagem ou centro não-livre → sem raio confiável
+                if not (0 <= cx < Ww and 0 <= cy < Hh):
+                    return 0
+                if img[cy, cx] != 255:
+                    return 0
+
+                # Não extrapolar os limites da imagem
+                max_radius = min(
+                    max_radius,
+                    cx, cy,
+                    Ww - 1 - cx,
+                    Hh - 1 - cy
+                )
+                if max_radius <= 0:
+                    return 0
+
+                n_angles = 36
+                r_limit = max_radius
+                best = r_limit
+
+                for k in range(n_angles):
+                    ang = 2.0 * math.pi * k / n_angles
+                    r = 1
+                    while r <= max_radius:
+                        x = int(round(cx + r * math.cos(ang)))
+                        y = int(round(cy + r * math.sin(ang)))
+                        # Qualquer coisa que não seja branco é considerado "parede/borda"
+                        if x < 0 or x >= Ww or y < 0 or y >= Hh or img[y, x] != 255:
+                            best = min(best, r)
+                            break
+                        r += 1
+
+                # Se não encontramos nada, usa max_radius mesmo
+                if best == r_limit:
+                    return max_radius
+
+                # Margem de segurança para ficar bem dentro do círculo
+                return max(1, best - 2)
+
             def is_valid_position(x, y, placed_positions, safety_radius=3):
                 """Verifica se a posição é válida: pixel branco + sem obstáculos próximos + distância de outros VANTs"""
                 # Verifica se está dentro dos limites da imagem REDIMENSIONADA
                 if not (0 <= x < W_used and 0 <= y < H_used):
                     return False
-                
+
                 # Verifica se o pixel é branco (caminho válido)
                 if graph_bw_img[y, x] != 255:  # Branco no bitmap invertido
                     return False
-                
+
                 # Verifica se há pixels pretos (obstáculos) na vizinhança imediata
                 for dx in range(-safety_radius, safety_radius + 1):
                     for dy in range(-safety_radius, safety_radius + 1):
@@ -750,24 +842,24 @@ def main():
                         if 0 <= nx < W_used and 0 <= ny < H_used:
                             if graph_bw_img[ny, nx] == 0:  # Pixel preto (obstáculo)
                                 return False
-                
+
                 # Verifica distância mínima de outros VANTs
                 for (px, py) in placed_positions:
                     if math.hypot(px - x, py - y) < min_sep:
                         return False
-                
+
                 return True
 
             def find_valid_positions_near_point(cx, cy, count, max_radius=30):
                 """Encontra múltiplas posições válidas próximas ao ponto (cx, cy)"""
                 valid_positions = []
-                
+
                 # Primeiro verifica a posição exata
                 if is_valid_position(cx, cy, placed_px):
                     valid_positions.append((cx, cy))
                     if len(valid_positions) >= count:
                         return valid_positions
-                
+
                 # Busca em círculos concêntricos
                 for radius in range(1, max_radius + 1):
                     # Gera pontos no círculo atual
@@ -776,12 +868,12 @@ def main():
                         angle = 2 * math.pi * i / num_points
                         x = int(round(cx + radius * math.cos(angle)))
                         y = int(round(cy + radius * math.sin(angle)))
-                        
+
                         if is_valid_position(x, y, placed_px + valid_positions):
                             valid_positions.append((x, y))
                             if len(valid_positions) >= count:
                                 return valid_positions
-                
+
                 return valid_positions
 
             # Para cada vertiport, posiciona os VANTs atribuídos
@@ -800,12 +892,18 @@ def main():
                     pixel_val = graph_bw_img[cy, cx] if (0 <= cx < W_used and 0 <= cy < H_used) else -1
                     print(f"[DEBUG] Pixel no vertiport {i}: {pixel_val} (255=branco, 0=preto)")
 
-                # Encontra posições válidas próximas ao vertiport
-                valid_positions = find_valid_positions_near_point(cx, cy, n_here)
-                
+                # Estima o raio livre do círculo do vertiport no bitmap
+                free_R = estimate_free_radius(cx, cy, graph_bw_img, max_radius=120)
+                if free_R <= 0:
+                    print(f"[WARN] Não consegui estimar raio livre para vertiport {i}; usando raio padrão.")
+                    free_R = 30  # fallback
+
+                # Encontra posições válidas DENTRO desse raio
+                valid_positions = find_valid_positions_near_point(cx, cy, n_here, max_radius=int(free_R))
+
                 if len(valid_positions) < n_here:
                     print(f"[WARN] Só encontrei {len(valid_positions)} posições válidas de {n_here} necessárias para vertiport {i}")
-                
+
                 # Adiciona as posições válidas encontradas
                 for pos in valid_positions:
                     placed_px.append(pos)
@@ -817,7 +915,7 @@ def main():
     if len(placed_px) < args.nvants:
         print(f"[WARN] Não foi possível posicionar todos os VANTs. Usando fallback...")
         missing = args.nvants - len(placed_px)
-        
+
         # Tenta encontrar posições aleatórias em pixels brancos no bitmap REDIMENSIONADO
         white_pixels = []
         for y in range(H_used):
@@ -836,14 +934,20 @@ def main():
                             break
                     if valid:
                         white_pixels.append((x, y))
-        
+
         if white_pixels:
             random.shuffle(white_pixels)
             for i in range(min(missing, len(white_pixels))):
                 pos = white_pixels[i]
-                if is_valid_position(pos[0], pos[1], placed_px):
+                # is_valid_position só existe se nodes != None;
+                # aqui supõe-se esse caso, como no código original.
+                if 'is_valid_position' in locals():
+                    if is_valid_position(pos[0], pos[1], placed_px):
+                        placed_px.append(pos)
+                        print(f"  - VANT adicional posicionado em {pos}")
+                else:
                     placed_px.append(pos)
-                    print(f"  - VANT adicional posicionado em {pos}")
+                    print(f"  - VANT adicional posicionado em {pos} (sem checagem detalhada)")
 
     if not placed_px:
         # fallback (sem pontos-base) usando o bitmap REDIMENSIONADO
@@ -931,8 +1035,8 @@ def main():
         sense_walls=True,
         collide_walls=True,
         robot_yaws=robot_yaws,
-        robot_height_m=0.30,             # <<< mantém altura do corpo usada no world
-        lidar_pose_rel=(0.0, 0.0, -0.15, 0.0)  # <<< LIDAR exatamente no meio do corpo
+        robot_height_m=0.30,             # mantém altura do corpo usada no world
+        lidar_pose_rel=(0.0, 0.0, -0.15, 0.0)  # LIDAR exatamente no meio do corpo
     )
 
     out_path = args.out or os.path.join(worlds_dir, 'airspace.world')
@@ -951,6 +1055,7 @@ def main():
     print(f"  - VANTs: {len(robot_poses_m)}/{args.nvants}")
     for i, (x, y) in enumerate(robot_poses_m):
         print(f"    vant_{i}: pose [{x:.2f} {y:.2f} {z:.2f} 0]  (z={z:.2f})  color={color_for(i)}")
+
 
 
 
