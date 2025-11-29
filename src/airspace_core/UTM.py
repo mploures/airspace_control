@@ -396,27 +396,40 @@ class UTMROSInterface:
             return generic_name, agent_id
         return ev_with_id, None
 
+
     def _on_event(self, msg):
         """
-        Recebe eventos do barramento /event (com ID) e:
+        Recebe eventos do barramento /event (com ou sem ID de agente) e:
         - Atualiza contagem de tarefas aceitas/encerradas (tarefa_aceita_*, tarefa_encerrada_*)
-        - Aplica eventos genéricos no supervisor monolítico (quando fizer sentido).
+        - Aplica eventos genéricos no supervisor monolítico (para um agente ou globalmente).
         """
         ev_with_id = str(msg.data or "").strip()
         if not ev_with_id:
             return
 
+        # 1) Faz o parse com a regex padrão
         generic_name, agent_id = self._extract_event_info(ev_with_id)
-        
-        # --- 0. Ping ---
+
+        # 1a) Ajuste importante:
+        # Se o "generic_name" NÃO existe no alfabeto do supervisor,
+        # mas o evento COMPLETO (ev_with_id) existe, então tratamos
+        # como um evento global da UTM sem ID de agente.
+        # Exemplo: "bloqueia_F0" foi cortado pela regex em ("bloqueia_F", 0),
+        # mas o alfabeto tem "bloqueia_F0", não "bloqueia_F".
+        if generic_name not in self.generic_event_objects and ev_with_id in self.generic_event_objects:
+            generic_name = ev_with_id
+            agent_id = None
+
+        # --- 0. Ping (pode vir com ou sem sufixo numérico, mas nos interessa o prefixo) ---
         if generic_name == "ping":
             rospy.loginfo(f"[{self.name}] Ping recebido — republishing state and events.")
             self._publish_state()
             return
 
-        # --- 1. Eventos de TAREFA  ---
-        if generic_name.startswith("tarefa_aceita_"):
-            # Agente aceitou uma tarefa -> conta como tarefa ativa
+        # --- 1. Eventos de TAREFA (não pertencem ao autômato DES) ---
+
+        # Com a regex atual, "tarefa_aceita_1" -> generic_name="tarefa_aceita", agent_id=1
+        if generic_name == "tarefa_aceita":
             if agent_id is not None:
                 with self.task_lock:
                     # Garante que o número de tarefas ativas nunca ultrapassa num_agent
@@ -437,10 +450,9 @@ class UTMROSInterface:
                             f"[{self.name}] tarefa_aceita_{agent_id} recebida, "
                             "mas agente já constava com tarefa ativa."
                         )
-            return  
+            return
 
-        if generic_name.startswith("tarefa_encerrada_"):
-            # Agente terminou a tarefa -> libera slot e tenta despachar outra
+        if generic_name == "tarefa_encerrada":
             if agent_id is not None:
                 is_removed = False
                 with self.task_lock:
@@ -456,30 +468,58 @@ class UTMROSInterface:
                             f"[{self.name}] tarefa_encerrada_{agent_id} recebida, "
                             "mas agente não constava com tarefa ativa."
                         )
-                
+
                 # Depois de liberar slot, tenta despachar nova tarefa
                 if is_removed:
-                    # Chamar fora do lock para evitar deadlocks caso o despacho se complexifique
                     self._dispatch_next_tasks_if_possible()
-            return  
+            return
 
+        # --- 2. Lógica do Supervisor DES (eventos do autômato) ---
 
         ev_obj = self.generic_event_objects.get(generic_name)
-        
-        # --- 2. Lógica do Supervisor DES ---
-        if ev_obj is None or agent_id is None or agent_id < 1 or agent_id > self.num_agent:
+
+        # Se não é evento do autômato, ignoramos aqui (já tratamos tarefas/ping acima)
+        if ev_obj is None:
             return
-            
+
+        # 2a) Caso de evento GLOBAL da UTM (sem ID de agente):
+        #     ex.: "bloqueia_F0", "desbloqueia_C3" gerados pelo próprio UTM.
+        if agent_id is None:
+            with self.state_lock:
+                any_change = False
+                for i, current_state in enumerate(self.agent_states):
+                    next_state = self._get_next_state(current_state, ev_obj)
+                    if next_state is not None and next_state != current_state:
+                        rospy.loginfo(
+                            f"[{self.name}] Transição GLOBAL em cópia {i}: "
+                            f"{current_state} --{generic_name}--> {next_state}"
+                        )
+                        self.agent_states[i] = next_state
+                        any_change = True
+
+                if any_change:
+                    self._publish_state()
+            return
+
+        # 2b) Caso de evento associado a um agente específico (como antes)
+        if agent_id < 1 or agent_id > self.num_agent:
+            return
+
         agent_idx = agent_id - 1
-        
+
         with self.state_lock:
             current_state = self.agent_states[agent_idx]
             next_state = self._get_next_state(current_state, ev_obj)
-            
+
             if next_state is not None:
-                rospy.loginfo(f"[{self.name}] Transição Agente {agent_id}: {current_state} --{generic_name}--> {next_state}")
+                rospy.loginfo(
+                    f"[{self.name}] Transição Agente {agent_id}: "
+                    f"{current_state} --{generic_name}--> {next_state}"
+                )
                 self.agent_states[agent_idx] = next_state
                 self._publish_state()
+
+
 
     def _on_tarefa_afazer(self, msg):
         """

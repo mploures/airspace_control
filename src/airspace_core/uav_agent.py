@@ -79,7 +79,7 @@ class VANT:
         # Objetivo e navegação
         self.goal = None
         self._goal_lock = threading.Lock()
-        self.goal_eps = self.ros_node.get_param("~goal_tolerance", 5) 
+        self.goal_eps = self.ros_node.get_param("~goal_tolerance", 0.5) 
         self._pending_release_event = None
         self._path = []
         self._current_path_index = 0
