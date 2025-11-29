@@ -197,7 +197,7 @@ class GenericVANTModel:
         self.specs: List[Any] = []
         self.Dicionario_Automatos: Dict[str, Any] = {}
         self.custos_estado_atomico: Dict[str, Tuple[float, float, float]] = {} # (E, Tf, D)
-        self.CUSTO_TEMPO_D = 10
+        self.CUSTO_TEMPO_D = 0.1
         # Construir todos os autômatos
         self._automato_movimento()
         self._automatos_arestas()
@@ -330,33 +330,30 @@ class GenericVANTModel:
 
     def _inicializar_custos_estados(self):
         """
-        Inicializa custos W = [E, Tf, D] com base em uma filosofia de "custo de oportunidade",
-        focando em penalizar energia e incentivar fortemente as tarefas.
+        Custos balanceados para evitar dominância de um único objetivo
         """
-
-        # Garante dicionário de parâmetros de custo
         if not hasattr(self, "cost_params"):
             self.cost_params = {}
 
         cp = self.cost_params
 
-        # NOVOS VALORES PADRÃO (Prioridades: E >> D >> Tf)
-        cp.setdefault("CUSTO_TEMPO_D", 0.5)
-        cp.setdefault("CUSTO_MOVIMENTO_E", 1.0)              # Aumentado: E base por mover
-        cp.setdefault("CUSTO_OPERACIONAL_E", 0.1)           # Custo leve de hovering/trabalho
-        cp.setdefault("INCENTIVO_CARGA_E", -15.0)           # Aumentado: Forte incentivo para carregar
-        cp.setdefault("INCENTIVO_COLETA_D", -30.0)          # Aumentado: Forte incentivo para pick
-        cp.setdefault("INCENTIVO_ENTREGA_D", -60.0)         # Aumentado: Incentivo máximo para place
-        cp.setdefault("PENALIDADE_BATERIA_E", 100.0)         # Extremo: Penalidade de energia em bat_baixa
-        cp.setdefault("PENALIDADE_BATERIA_D", 100.0)         # Extremo: Penalidade de progresso em bat_baixa
+        # VALORES BALANCEADOS - Reduzindo magnitudes extremas
+        cp.setdefault("CUSTO_TEMPO_D", 0.1)           # Reduzido: penalidade leve por tempo
+        cp.setdefault("CUSTO_MOVIMENTO_E", 0.2)       # Reduzido: custo moderado de movimento
+        cp.setdefault("CUSTO_OPERACIONAL_E", 0.05)    # Reduzido: custo leve de operação
+        cp.setdefault("INCENTIVO_CARGA_E", -2.0)      # Reduzido: incentivo moderado para carga
+        cp.setdefault("INCENTIVO_COLETA_D", -5.0)     # Reduzido: incentivo balanceado para coleta
+        cp.setdefault("INCENTIVO_ENTREGA_D", -8.0)    # Reduzido: incentivo balanceado para entrega
+        cp.setdefault("PENALIDADE_BATERIA_E", 5.0)    # Reduzido: penalidade moderada
+        cp.setdefault("PENALIDADE_BATERIA_D", 3.0)    # Reduzido: penalidade moderada
         
-        # Parâmetros de Ajuste Contextual (para obter_custo_estado_supervisor)
-        cp.setdefault("PESO_DISTANCIA_D", 0.5)              # Aumentado: Penalidade de D por metro de distância
-        cp.setdefault("PENALIDADE_NO_LOGICO_D", 10.0)       # Aumentado: D extra por passo parado em nó lógico
-        cp.setdefault("FATOR_DISTANCIA_TAREFA", 2.0)
-        cp.setdefault("EXTRA_TF_PARADO", 0.2)
-        cp.setdefault("EXTRA_TF_PARADO_LOGICO", 0.5)
-        cp.setdefault("CUSTO_OCIOSIDADE_E", 0.2)             # Novo: Custo de energia por estar Parado/Ocioso
+        # Parâmetros contextuais mais suaves
+        cp.setdefault("PESO_DISTANCIA_D", 0.05)       # Reduzido: penalidade leve por distância
+        cp.setdefault("PENALIDADE_NO_LOGICO_D", 1.0)  # Reduzido: penalidade moderada
+        cp.setdefault("FATOR_DISTANCIA_TAREFA", 1.2)  # Reduzido: fator menor
+        cp.setdefault("EXTRA_TF_PARADO", 0.05)        # Reduzido: tempo extra leve
+        cp.setdefault("EXTRA_TF_PARADO_LOGICO", 0.1)  # Reduzido: tempo extra leve
+        cp.setdefault("CUSTO_OCIOSIDADE_E", 0.1)      # Reduzido: custo de ociosidade leve
 
         CUSTO_MOVIMENTO_E    = cp["CUSTO_MOVIMENTO_E"]
         CUSTO_OPERACIONAL_E  = cp["CUSTO_OPERACIONAL_E"]
@@ -370,53 +367,54 @@ class GenericVANTModel:
         self._precomputar_distancia_para_vertices_especiais()
         self.custos_estado_atomico.clear()
 
-        # 1. Base: D > 0 para penalidade de passo
+        # 1. Base: custo de tempo leve para todos os estados
         for nome_automato, automato in self.Dicionario_Automatos.items():
             for estado in states(automato):
                 self.custos_estado_atomico[str(estado)] = (0.0, 0.0, CUSTO_TEMPO_D)
 
-        # 2. Movimento: (E, Tf, D)
+        # 2. Movimento: custos proporcionais à distância real
         if "Movendo" in self.custos_estado_atomico:
             self.custos_estado_atomico["Movendo"] = (
-                CUSTO_MOVIMENTO_E,  # E: custo base de energia por se mover (maior peso)
-                0.1,                # Tf
-                CUSTO_TEMPO_D       # D
+                CUSTO_MOVIMENTO_E,  # E: custo base moderado
+                0.05,               # Tf: tempo leve
+                CUSTO_TEMPO_D       # D: penalidade de tempo
             )
 
-        # Estados ocupados de aresta
+        # Estados de aresta - baseados na distância real
         for u, v, k, data in self.G.edges(keys=True, data=True):
             tempo_voo = self._obter_tempo_voo_aresta(u, v)
-            consumo_energia = self._obter_consumo_energia_aresta(u, v) # Já inclui distância
+            consumo_energia = self._obter_consumo_energia_aresta(u, v)
             
             for estado_ocupado in [f"ocupado_{u}{v}", f"ocupado_{v}{u}"]:
                 if estado_ocupado in self.custos_estado_atomico:
                     self.custos_estado_atomico[estado_ocupado] = (
-                        consumo_energia,  # E: Custo de energia por aresta (Minimiza Distância)
-                        tempo_voo,        # Tf: Duração física
-                        CUSTO_TEMPO_D     # D
+                        consumo_energia,  # E: proporcional à distância
+                        tempo_voo,        # Tf: tempo real de voo
+                        CUSTO_TEMPO_D     # D: penalidade de tempo
                     )
 
-        # 3. Localização: Carga e Trabalho (Incentivos e Ganhos em E e D)
+        # 3. Localização: incentivos moderados
         for nome_no in self.G.nodes():
             estado_mapa = str(nome_no)
-            if estado_mapa not in self.custos_estado_atomico: continue
+            if estado_mapa not in self.custos_estado_atomico: 
+                continue
 
             tipo_no = self._tipo_norm(self.G.nodes[nome_no].get("tipo", ""))
 
             if tipo_no in {"ESTACAO", "VERTIPORT"}:
                 self.custos_estado_atomico[estado_mapa] = (
-                    INCENTIVO_CARGA_E,  # E: Incentivo Forte Negativo (Ganho)
-                    0.0,                # Tf
-                    CUSTO_TEMPO_D       # D
+                    INCENTIVO_CARGA_E,  # E: incentivo moderado
+                    0.0,
+                    CUSTO_TEMPO_D
                 )
             elif tipo_no in {"FORNECEDOR", "CLIENTE"}:
                 self.custos_estado_atomico[estado_mapa] = (
-                    CUSTO_OPERACIONAL_E,  # E: Custo leve de hovering
-                    0.0,                  # Tf
-                    CUSTO_TEMPO_D         # D
+                    CUSTO_OPERACIONAL_E,
+                    0.0,
+                    CUSTO_TEMPO_D
                 )
 
-        # 4. Estados de trabalho ativo (Incentivos Máximos em D)
+        # 4. Trabalho: incentivos balanceados
         for nome_no in self.G.nodes():
             tipo_no = self._tipo_norm(self.G.nodes[nome_no].get("tipo", ""))
             estado_trab = f"trabalhando_{nome_no}"
@@ -424,44 +422,42 @@ class GenericVANTModel:
             if estado_trab in self.custos_estado_atomico:
                 incentivo = INCENTIVO_COLETA_D if tipo_no == "FORNECEDOR" else INCENTIVO_ENTREGA_D
                 self.custos_estado_atomico[estado_trab] = (
-                    CUSTO_OPERACIONAL_E,   # E
-                    0.0,                   # Tf
-                    incentivo              # D: Incentivo Forte Negativo
+                    CUSTO_OPERACIONAL_E,
+                    0.0,
+                    incentivo  # D: incentivo balanceado
                 )
 
-        # Workflow global (pick/place)
+        # Workflow global
         if "pick" in self.custos_estado_atomico:
             self.custos_estado_atomico["pick"] = (0.0, 0.0, INCENTIVO_COLETA_D)
         if "place" in self.custos_estado_atomico:
             self.custos_estado_atomico["place"] = (0.0, 0.0, INCENTIVO_ENTREGA_D)
 
-        # 5. Penalidades fortes (Bateria Baixa)
+        # 5. Bateria baixa: penalidades moderadas
         if "bat_baixa" in self.custos_estado_atomico:
             self.custos_estado_atomico["bat_baixa"] = (
-                PENALIDADE_BATERIA_E,  # E: Penalidade Extrema
+                PENALIDADE_BATERIA_E,
                 0.0,
-                PENALIDADE_BATERIA_D   # D: Penalidade Extrema
+                PENALIDADE_BATERIA_D
             )
 
     def obter_custo_estado_supervisor(self, estado_supervisor) -> Tuple[float, float, float]:
         """
-        Calcula custo W = [E, Tf, D] para um estado do supervisor, aplicando
-        ajustes contextuais de penalidade de ociosidade e distância.
+        Cálculo de custo balanceado - evita dominância de fatores contextuais
         """
         cp = self.cost_params
 
-        # Parâmetros de Ajuste Contextual (garantidos em _inicializar_custos_estados)
         PESO_DISTANCIA_D        = cp["PESO_DISTANCIA_D"]
         FATOR_DISTANCIA_TAREFA  = cp["FATOR_DISTANCIA_TAREFA"]
         EXTRA_TF_PARADO         = cp["EXTRA_TF_PARADO"]
         EXTRA_TF_PARADO_LOGICO  = cp["EXTRA_TF_PARADO_LOGICO"]
         PENALIDADE_NO_LOGICO_D  = cp["PENALIDADE_NO_LOGICO_D"]
-        CUSTO_OCIOSIDADE_E      = cp["CUSTO_OCIOSIDADE_E"] # Novo Custo de Ociosidade em E
+        CUSTO_OCIOSIDADE_E      = cp["CUSTO_OCIOSIDADE_E"]
 
         E_total, Tf_total, D_total = 0.0, 0.0, 0.0
         componentes = [c.strip() for c in str(estado_supervisor).split('|') if c.strip()]
 
-        # 1) Soma dos custos base de cada estado atômico
+        # 1) Soma dos custos base (80% do peso)
         for estado_componente in componentes:
             if estado_componente in self.custos_estado_atomico:
                 E, Tf, D = self.custos_estado_atomico[estado_componente]
@@ -469,54 +465,41 @@ class GenericVANTModel:
                 Tf_total += Tf
                 D_total += D
 
-        # 2) Análise de contexto (Movimento, Mapa, Tarefa)
+        # 2) Fatores contextuais (20% do peso máximo)
         map_node = next((c for c in componentes if c in self.G.nodes), None)
         is_moving  = ("Movendo" in componentes)
         is_stopped = ("Parado" in componentes)
         contexto_trabalho = any(c.startswith(("trabalhando_", "pick", "place")) for c in componentes)
         
-        # 2.1) Penalidade de Energia (E) por Ociosidade (Prioridade: Minimizar Distância/Ociosidade)
-        # Aplica um custo de energia se estiver Parado E não estiver ativamente em um local de trabalho/carregamento.
+        # 2.1) Ociosidade leve
         if is_stopped:
             tipo_no = self._tipo_norm(self.G.nodes[map_node].get("tipo", "")) if map_node else ""
-            
             is_charging_or_working_local = tipo_no in {"FORNECEDOR", "CLIENTE", "ESTACAO", "VERTIPORT"} or contexto_trabalho
             
-            # Se o agente está parado e não está ativamente trabalhando/carregando
             if not is_charging_or_working_local:
-                 E_total += CUSTO_OCIOSIDADE_E 
+                E_total += CUSTO_OCIOSIDADE_E 
 
-        # 2.2) Penalidade por Distância a Vértices Especiais (Prioridade: Minimizar Distância)
+        # 2.2) Distância moderada
         if map_node is not None and hasattr(self, "_dist_min_especial"):
             dist = self._dist_min_especial.get(map_node, 0.0)
-
             if dist > 0.0:
                 ganho_dist = PESO_DISTANCIA_D
                 if contexto_trabalho:
-                    # Se há tarefa ativa, ficar longe de vértices especiais é ainda pior
                     ganho_dist *= FATOR_DISTANCIA_TAREFA
+                
+                # Limita o impacto máximo da distância
+                impacto_maximo = 2.0  # Máximo de 2.0 no custo D por distância
+                D_total += min(ganho_dist * dist, impacto_maximo)
 
-                # Aumenta a penalidade D proporcionalmente à distância (muito mais forte agora)
-                D_total += ganho_dist * dist
-
-                # Se está Parado longe, aumenta também Tf
                 if is_stopped:
-                    Tf_total += EXTRA_TF_PARADO * (1.0 + dist)
+                    Tf_total += min(EXTRA_TF_PARADO * dist, 0.5)  # Limite de 0.5 no Tf
 
-        # 2.3) Penalidade forte por ficar parado em nó lógico (Prioridade: Minimizar Ociosidade)
+        # 2.3) Nó lógico moderado
         if map_node is not None:
             tipo_no = self._tipo_norm(self.G.nodes[map_node].get("tipo", ""))
-
             if tipo_no == "" and is_stopped:
-                # Nó lógico + agente parado: Extremamente indesejável
                 D_total += PENALIDADE_NO_LOGICO_D
                 Tf_total += EXTRA_TF_PARADO_LOGICO
-        
-        # 2.4) Penalidade por Bateria Baixa (Ajuste Contextual)
-        if "bat_baixa" in componentes:
-            # Se estiver com bateria baixa, mas em nó de carga, diminui um pouco a penalidade de D para incentivar a permanência
-            if tipo_no in {"ESTACAO", "VERTIPORT"}:
-                 D_total -= PENALIDADE_NO_LOGICO_D / 2.0 # Reduz a penalidade D pela metade se o agente fez a escolha correta
 
         return (E_total, Tf_total, D_total)
 
@@ -891,9 +874,6 @@ class VANTInstance:
     """
     Especializa o supervisor genérico para um VANT específico (id_num),
     incluindo um sistema de controle inteligente baseado em otimização MILP (Janela Deslizante).
-
-    Esta versão garante que a otimização usa eventos com ID (vant_1) e publica no barramento 
-    ROS com eventos GENÉRICOS (vant).
     """
     _RE_SUFFIX = re.compile(r"^(.*)_(\d+)$")
 
@@ -920,13 +900,17 @@ class VANTInstance:
         self._planning_horizon = 5         # Horizonte padrão para o MILP (ajuste se quiser)
         self._claimed_tasks = set()
 
+        # NOVO: Buffer para o próximo evento controlável planejado
+        self._execution_queue = [] 
+        self._queue_lock = threading.Lock() # Usa este lock no lugar de _buffer_lock
+
         self.dynamic_cost_dict = model.dicionario_custos_supervisor.copy()
         
         # Parâmetros de Penalidade por Persistência (ajustáveis)
         self.cost_params = {
-            "PERSISTENCE_PENALTY_D": 1.0,  # Penalidade D por segundo parado (Forte)
-            "PERSISTENCE_PENALTY_TF": 0.2, # Penalidade Tf por segundo parado (Leve)
-            "CHARGE_INCENTIVE_MULT": 5.0,  # Multiplicador do incentivo de carga (em caso de bat_baixa)
+        "PERSISTENCE_PENALTY_D": 0.1,      # Reduzido drasticamente
+        "PERSISTENCE_PENALTY_TF": 0.02,    # Reduzido drasticamente  
+        "CHARGE_INCENTIVE_MULT": 1.5,      # Moderado
         }
         
         # Rastreamento de tempo
@@ -999,7 +983,7 @@ class VANTInstance:
                 queue_size=10
             )
 
-            # NOVO: Subscriber para eventos proibidos globais (do UTM Central)
+            # Subscriber para eventos proibidos globais (do UTM Central)
             self.sub_global_prohibited=rospy.Subscriber(
                 "/eventos_proibidos", 
                 String,
@@ -1007,7 +991,6 @@ class VANTInstance:
                 queue_size=10
             )
                 
-
             self.pub_tarefas_claim = rospy.Publisher("/tarefas_claims", String, queue_size=10)
             self.sub_tarefas_claim = rospy.Subscriber(
                 "/tarefas_claims",
@@ -1015,7 +998,6 @@ class VANTInstance:
                 self._callback_tarefas_claim,
                 queue_size=10
             )
-
             rospy.sleep(0.3)
             self._publish_ros()
 
@@ -1032,9 +1014,6 @@ class VANTInstance:
     def _is_globally_prohibited(self, ev_with_id: str) -> bool:
         """
         Verifica se o evento com sufixo _{id} está proibido pelo UTM.
-
-        - Converte ev_with_id -> nome genérico (sem _{id})
-        - Checa se esse nome está em _global_prohibited_generic.
         """
         # Remove o sufixo _id (usa o mesmo regex da classe)
         m = self._RE_SUFFIX.match(ev_with_id)
@@ -1048,13 +1027,8 @@ class VANTInstance:
         
     def _update_dynamic_cost(self):
         """
-        Atualiza o dicionário de custos dinâmicos (self.dynamic_cost_dict)
-        com base em:
-        1. Penalidade por Persistência (tempo gasto no estado atual).
-        2. Forte Incentivo para Carregar (se 'bat_baixa' estiver ativo).
+        Atualização dinâmica balanceada - evita mudanças bruscas
         """
-        
-        current_time = self.last_state_entry_time # Inicialização para evitar erro
         if self.enable_ros:
             import rospy
             current_time = rospy.get_time()
@@ -1063,77 +1037,59 @@ class VANTInstance:
             
         current_state_str = str(self._state)
         
-        # 1. Copia o custo base estático para garantir que os estados não persistentes sejam resetados.
+        # 1. Sempre começa do custo base estático
         self.dynamic_cost_dict = self.model.dicionario_custos_supervisor.copy()
         
-        # Parâmetros de penalidade
-        PENALTY_D = self.cost_params["PERSISTENCE_PENALTY_D"]
-        PENALTY_TF = self.cost_params["PERSISTENCE_PENALTY_TF"]
-        CHARGE_MULT = self.cost_params["CHARGE_INCENTIVE_MULT"]
+        # Parâmetros MUITO mais conservadores
+        PENALTY_D = 0.1  # Reduzido drasticamente
+        PENALTY_TF = 0.02  # Reduzido drasticamente
+        CHARGE_MULT = 1.5  # Incentivo moderado
 
-        # ----------------------------- 1. Persistência de Estado (Penalidade) -----------------------------
-        
+        # ----------------------------- Persistência Leve -----------------------------
         time_spent = current_time - self.last_state_entry_time
         
-        # Se o VANT estiver no estado atual há algum tempo
-        if time_spent > 0 and current_state_str in self.dynamic_cost_dict:
-            
+        # Aplica penalidade apenas após um tempo significativo
+        if time_spent > 2.0 and current_state_str in self.dynamic_cost_dict:  # Só após 2 segundos
             E_base, Tf_base, D_base = self.dynamic_cost_dict[current_state_str]
             
-            # Aumenta o custo de tempo (Tf) e penalidade de progresso (D)
-            Tf_increase = time_spent * PENALTY_TF
-            D_increase = time_spent * PENALTY_D
+            # Penalidades muito mais leves e com limite
+            Tf_increase = min(time_spent * PENALTY_TF, 0.3)  # Máximo 0.3
+            D_increase = min(time_spent * PENALTY_D, 0.5)    # Máximo 0.5
             
             self.dynamic_cost_dict[current_state_str] = (
                 E_base,
                 Tf_base + Tf_increase,
                 D_base + D_increase
             )
-            # rospy.loginfo(f"[{self.name}] Penalidade de Persistência em '{current_state_str}': D +{D_increase:.2f}")
 
-
-        # ----------------------------- 2. Bateria Baixa (Incentivo Forte) -----------------------------
-        
+        # ----------------------------- Bateria Baixa Moderada -----------------------------
         if "bat_baixa" in current_state_str:
-            
-            # Valor base do incentivo de carga (de _inicializar_custos_estados no GenericVANTModel)
-            base_incentive_E = self.model.cost_params.get("INCENTIVO_CARGA_E", -15.0)
+            base_incentive_E = self.model.cost_params.get("INCENTIVO_CARGA_E", -2.0)
             
             for state_str, (E, Tf, D) in self.dynamic_cost_dict.items():
-                
                 componentes = [c.strip() for c in state_str.split('|') if c.strip()]
                 map_node = next((c for c in componentes if c in self.model.G.nodes), None)
 
                 if map_node:
-                     tipo_no = self.model._tipo_norm(self.model.G.nodes[map_node].get("tipo", ""))
-                     
-                     # Verifica se o estado representa estar em um nó de carga
-                     if tipo_no in {"ESTACAO", "VERTIPORT"}:
-                         
-                         # Cálculo do incentivo extra
-                         extra_incentive_E = base_incentive_E * (CHARGE_MULT - 1.0)
-                         
-                         # Aumenta o ganho (valor negativo) de energia (E)
-                         E_updated = E + extra_incentive_E
-                         
-                         # Adiciona um forte ganho de progresso (D) para ir logo carregar
-                         D_updated = D + (base_incentive_E * 2.0) # Adiciona um D negativo forte
-                         
-                         self.dynamic_cost_dict[state_str] = (E_updated, Tf, D_updated)
+                    tipo_no = self.model._tipo_norm(self.model.G.nodes[map_node].get("tipo", ""))
+                    
+                    if tipo_no in {"ESTACAO", "VERTIPORT"}:
+                        # Incentivo moderado (não extremo)
+                        extra_incentive_E = base_incentive_E * (CHARGE_MULT - 1.0)
+                        E_updated = E + extra_incentive_E
+                        
+                        # Incentivo de progresso moderado
+                        D_updated = D + (base_incentive_E * 0.5)  # Reduzido
+                        
+                        self.dynamic_cost_dict[state_str] = (E_updated, Tf, D_updated)
 
-            if self.enable_ros:
-                import rospy
-                rospy.logwarn(f"[{self.name}] BATERIA BAIXA: Incentivo de Carga x{CHARGE_MULT} Aplicado.")
-    
-    
+
     def _on_event(self, msg):
         """Recebe eventos do barramento /event (String)."""
         ev = str(msg.data or "")
         if ev == "ping":
-            # re-publica o snapshot para o painel
             self._publish_ros()
             return
-        # aplica se for do meu id e estiver habilitado no estado
         _ = self.step(ev)  # step já filtra por id e verifica a transição
 
     # ----------------------- CALLBACK DE TAREFAS (NOVO) -----------------------
@@ -1152,31 +1108,23 @@ class VANTInstance:
                 # Converte a string (separada por vírgulas) em um conjunto de strings de eventos genéricos
                 self._global_prohibited_generic = set(raw.split(','))
         
-        # Loga para acompanhamento (opcional)
-        # rospy.loginfo(f"[{self.name}] Eventos proibidos globais atualizados: {self._global_prohibited_generic}")
-
     def _callback_tarefas_claim(self, msg):
         """
-        Recebe claims de tarefas no formato exatamente igual ao /tarefas:
-            'FORNECEDOR_X,CLIENTE_Y'
-        e registra que essa tarefa já foi pega por algum VANT.
+        Recebe claims de tarefas no formato ID_TAREFA:FORNECEDOR_X,CLIENTE_Y
+        e registra que essa tarefa já foi pega por algum VANT, atualizando
+        o conjunto _claimed_tasks APENAS via comunicação ROS.
         """
         raw = str(msg.data or "").strip()
         if not raw:
             return
+        # AQUI é o local CORRETO para adicionar o claim, pois o VANT
+        # está recebendo a confirmação via rede (garantindo sincronia).
         self._claimed_tasks.add(raw)
 
     def _callback_tarefas(self, msg):
         """
         Recebe tarefas no formato ATUALIZADO:
             'ID_TAREFA:FORNECEDOR_X,CLIENTE_Y'
-
-        Protocolo Otimizado (Anti-Colisão):
-          1. Checa se já claimada (pelo ID completo) ou ocupado. Se sim, ignora.
-          2. Espera um **pequeno delay aleatório** (anti-empate).
-          3. **VERIFICAÇÃO FINAL**: Checa se a tarefa foi claimada por outro VANT durante o delay.
-          4. Se NÃO claimada, este VANT é o vencedor, PUBLICA o CLAIM (ID completo) para todos.
-          5. Ativa a tarefa e dispara o MILP.
         """
         if not self.enable_ros:
             return
@@ -1191,13 +1139,12 @@ class VANTInstance:
         if not raw:
             return
 
-        # ----------------------------- NOVO PARSING -----------------------------
+        # ----------------------------- PARSING -----------------------------
         if ":" not in raw:
             rospy.logwarn(f"[{self.name}] Formato inválido de tarefa recebida: '{raw}'. Esperado 'ID:FORNECEDOR,CLIENTE'.")
             self.pub_cmd_event.publish(String(data=f"rejeita_tarefa_{self.id}" ))
             return
             
-        # Divide pelo primeiro ':' para separar o ID do resto
         try:
             task_id, nodes_raw = raw.split(":", 1)
         except ValueError:
@@ -1205,7 +1152,6 @@ class VANTInstance:
             self.pub_cmd_event.publish(String(data=f"rejeita_tarefa_{self.id}" ))
             return
 
-        # Extrai Fornecedor e Cliente da segunda parte
         parts = [p.strip() for p in nodes_raw.split(",") if p.strip()]
         if len(parts) != 2:
             rospy.logwarn(f"[{self.name}] Formato inválido de nós na tarefa: '{nodes_raw}'. Esperado 'FORNECEDOR,CLIENTE'.")
@@ -1226,26 +1172,37 @@ class VANTInstance:
             self.pub_cmd_event.publish(String(data=f"rejeita_tarefa_{self.id}" ))
             return
 
-        # 2. Pequeno atraso aleatório para evitar empates
-        delay = random.uniform(0.0, 0.5)
+        # 2. Pequeno atraso aleatório.
+        d = 0.5
+
+        ai0 = (self.id) * (d + 1)
+        aik = ai0 + d
+
+        delay = random.uniform(ai0, aik)
         rospy.loginfo(f"[{self.name}] Atraso de {delay:.2f}s para evitar colisão de CLAIM na tarefa '{raw}'.")
         rospy.sleep(delay)
 
         # 3. VERIFICAÇÃO FINAL: Checa se alguém ganhou a corrida durante o delay.
+        # Esta verificação agora depende que o CLAIM do vencedor tenha sido recebido
+        # e processado no _callback_tarefas_claim (via ROS).
         if raw in self._claimed_tasks:
             rospy.loginfo(f"[{self.name}] Após delay, tarefa '{raw}' já foi claimada por outro VANT. Ignorando.")
             self.pub_cmd_event.publish(String(data=f"rejeita_tarefa_{self.id}" ))
             return
 
-        # 4. SUCESSO! ESTE VANT VENCEU. Publica o CLAIM e registra localmente.
+        # 4. SUCESSO! ESTE VANT VENCEU. Publica o CLAIM.
         rospy.loginfo(f"[{self.name}] VENCEDOR: Publicando CLAIM para tarefa: {raw}.")
         self.pub_tarefas_claim.publish(String(data=raw))
         
         # 5. Ativa a tarefa e dispara o MILP
-        # ATUALIZAÇÃO: Armazena o RAW completo ('ID:F,C') como tarefa ativa para rastreamento exclusivo.
+        # ATUALIZAÇÃO: Armazena o RAW completo ('ID:F,C') como tarefa ativa
         self._tarefa_ativa = raw
-        # Registra localmente AGORA, sem depender do callback (para segurança extra)
-        self._claimed_tasks.add(raw) 
+        
+        # 🚨 CORREÇÃO CRÍTICA: REMOVER O REGISTRO LOCAL IMEDIATO
+        # self._claimed_tasks.add(raw) <--- REMOVIDO!
+        # O claim será adicionado ao self._claimed_tasks quando for recebido pelo
+        # próprio VANT via loopback do ROS (pelo _callback_tarefas_claim),
+        # garantindo que outros VANTs já o tenham recebido.
 
         rospy.loginfo(f"[{self.name}] Tarefa recebida e **CLAIMADA** com sucesso: {self._tarefa_ativa}.")
         self.pub_cmd_event.publish(String(data=f"aceita_tarefa_{self.id}" ))
@@ -1264,13 +1221,29 @@ class VANTInstance:
         return self._state
 
     def enabled_events(self):
-        """Eventos habilitados (já com sufixo _{id}) como strings."""
+        """Eventos habilitados (já com sufixo _{id}) como strings, FILTRADOS pelas proibições globais do UTM."""
         s = str(self._state)
-        out = []
+        factible_events_id = set()
+        
+        # 1. Eventos factíveis no supervisor local (com ID)
         for (q, e, _d) in self._trs_id:
             if str(q) == s:
-                out.append(str(e))  # Retorna como string para interface externa
-        return sorted(set(out))
+                factible_events_id.add(str(e))
+        
+        enabled_events_id = set()
+        
+        # 2. Filtra por proibições globais do UTM
+        with self._prohibited_lock:
+            global_prohibited = self._global_prohibited_generic.copy()
+            
+        for ev_id in factible_events_id:
+            # Obtém o nome genérico (sem o ID do VANT)
+            generic_name = self.rev_event_map.get(ev_id)
+            
+            if generic_name is None or generic_name not in global_prohibited:
+                enabled_events_id.add(ev_id)
+        
+        return sorted(list(enabled_events_id))
 
     def _should_process(self, ev: str) -> bool:
         """
@@ -1285,11 +1258,7 @@ class VANTInstance:
 
     def step(self, ev: str) -> bool:
         """
-        Tenta aplicar o evento 'ev'. Retorna True se transicionou, False caso contrário.
-        Recebe string como entrada, converte para objeto Event internamente.
-
-        Atualizado: Se a transição aplicada for um evento Controlável ou de Progresso/Liberação,
-        e houver uma tarefa ativa, dispara um novo MILP (receding horizon).
+        Aplica o evento 'ev'. Implementa o controle reativo com fila de execução (MPC).
         """
         if not self._should_process(ev):
             return False
