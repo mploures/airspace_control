@@ -9,6 +9,7 @@ import scipy.sparse as sp
 import time
 import os
 import threading 
+import warnings 
 
 # =========================
 # GESTÃO GLOBAL GUROBI E MUTEX 
@@ -43,18 +44,16 @@ BETA_INCENTIVE = 10.0
 ALPHA_TIME = 0.4      
 ALPHA_STATE = 0.3     
 
+# =========================
+# FUNÇÕES AUXILIARES (Necessárias para Funcionalidade)
+# =========================
 
-# As funções 'new_sub_automato_propriedade' e 'compute_reach'
-# permanecem inalteradas, pois já são otimizadas.
-# ----------------------------------------------------------------------------------
+# NOTA: O código abaixo presume a existência de funções auxiliares como 
+# event, dfa, states, transitions (vindo de airspace_core/extract_automaton_matrices).
+# O corpo delas é re-incluído para tornar o código completo.
 
 def new_sub_automato_propriedade(G, e, Nc):
-    """
-    Versão otimizada para Nc grande. (Não alterada)
-    """
-    # ---------------------------------------------------------
-    # 1) Pré-processa transições, BFS e Recorte (Otimizado)
-    # ---------------------------------------------------------
+    """Versão otimizada para Nc grande. (Re-incluído para funcionalidade)"""
     transicoes = transitions(G)
 
     por_origem = defaultdict(list)
@@ -66,7 +65,7 @@ def new_sub_automato_propriedade(G, e, Nc):
     fila = deque([(estado_inicial, 0)])
     profundidade = {estado_inicial: 0}
 
-    recorte_trans = []  # transições do sub-autômato
+    recorte_trans = []
 
     while fila:
         estado, d = fila.popleft()
@@ -80,9 +79,6 @@ def new_sub_automato_propriedade(G, e, Nc):
                 profundidade[dest] = d + 1
                 fila.append((dest, d + 1))
 
-    # ---------------------------------------------------------
-    # 2) Correção iterativa da propriedade algébrica
-    # ---------------------------------------------------------
     def aplica_correcao(trans_list, depth, max_iter=20):
         for _ in range(max_iter):
             adj = defaultdict(set)             
@@ -124,9 +120,6 @@ def new_sub_automato_propriedade(G, e, Nc):
 
     trans_corrigidas = aplica_correcao(recorte_trans, profundidade)
 
-    # ---------------------------------------------------------
-    # 3) Estados mortos e ε-loops
-    # ---------------------------------------------------------
     epsolon = event("epslon", controllable=False) 
 
     origs = {t[0] for t in trans_corrigidas}
@@ -138,9 +131,6 @@ def new_sub_automato_propriedade(G, e, Nc):
     for st in estados_mortos:
         trans_corrigidas.append((st, epsolon, st))
 
-    # ---------------------------------------------------------
-    # 4) Criar o novo autômato corrigido
-    # ---------------------------------------------------------
     new_automaton = dfa(
         trans_corrigidas,
         estado_inicial,
@@ -150,7 +140,7 @@ def new_sub_automato_propriedade(G, e, Nc):
     return new_automaton
 
 def compute_reach(A_csr, H, start=0, inviaveis=None):
-    """Calcula estados alcançáveis para o horizonte H, ignorando inviáveis. (Não alterada)"""
+    """Calcula estados alcançáveis para o horizonte H, ignorando inviáveis. (Re-incluído para funcionalidade)"""
     n_ = A_csr.shape[0]
     banned = np.zeros(n_, dtype=bool)
     if inviaveis is not None and inviaveis.size:
@@ -178,11 +168,14 @@ def compute_reach(A_csr, H, start=0, inviaveis=None):
     return reach_
 
 
-# ----------------------------------------------------------------------------------
+# =========================
+# FUNÇÃO PRINCIPAL: OTIMIZADOR (Corrigida e Otimizada)
+# =========================
 
 def otimizador(Sup, estado_inicial_recorte, janela, cost_dictionary, list_eventos_interesse, list_eventos_proibidos):
     """
-    Versão Otimizada com Warm Start e Mutex Seguro.
+    Versão Otimizada com Warm Start, Mutex Seguro e VETORIZAÇÃO das Restrições.
+    Corrigido o erro 'prod' usando multiplicação matricial ou quicksum.
     """
     global GLOBAL_LAST_U_SEQUENCE, GLOBAL_LAST_EVENT_NAMES
     
@@ -194,7 +187,7 @@ def otimizador(Sup, estado_inicial_recorte, janela, cost_dictionary, list_evento
     print(f"[LOG-MILP] 1. Iniciando otimizador para Horizonte H={H}")
 
     # =================================================================
-    # ETAPAS FORA DO MUTEX: PRÉ-PROCESSAMENTO INTENSIVO DE CPU/MEMÓRIA
+    # ETAPAS FORA DO MUTEX: PRÉ-PROCESSAMENTO INTENSIVO
     # =================================================================
 
     # 1. Recortar e Extrair Matrizes
@@ -266,10 +259,13 @@ def otimizador(Sup, estado_inicial_recorte, janela, cost_dictionary, list_evento
                 tau = model.addMVar((H, m_I), vtype=GRB.BINARY, name="tau")
             else:
                 tau = None
+            
+            # Desabilitar logs temporariamente
+            model.setParam("OutputFlag", 0) 
 
-            # =========================
-            # RESTRIÇÕES - CORRIGIDAS
-            # =========================
+            # =======================================================
+            # RESTRIÇÕES - CORRIGIDAS E VETORIZADAS
+            # =======================================================
             
             # I. Estado e Transição
             if 0 in pos[0]:
@@ -283,73 +279,109 @@ def otimizador(Sup, estado_inicial_recorte, janela, cost_dictionary, list_evento
             if H < A_csr.shape[0]: 
                 model.addConstr(x[H].sum() == 1.0, name=f"state_onehot_t{H}")
 
-            # Restrições de Disponibilidade (versão original)
+            # ----------------------------------------------------
+            # OTIMIZAÇÃO 1 CORRIGIDA: RESTRIÇÕES DE DISPONIBILIDADE
+            # Substituído 'prod' por multiplicação matricial ou quicksum
+            # ----------------------------------------------------
+            
+            # Pré-calcula a submatriz C para ser usada repetidamente
+            C_dense = C_csr.todense()
+            
             for t in range(H):
                 rt = reach[t]
                 if rt.size > 0:
-                    for j in range(m):
-                        coeffs = np.array([C_csr[state_global, j] for state_global in rt])
-                        if np.sum(coeffs) == 0:
-                            model.addConstr(u[t, j] == 0.0, name=f"event_disabled_t{t}_e{j}")
-                        else:
-                            model.addConstr(u[t, j] <= x[t] @ coeffs, name=f"event_feas_t{t}_e{j}")
+                    C_sub_rt = C_dense[rt, :] # Matriz de coeficientes (len(rt) x m)
+                    
+                    # Correção: Usar o operador @ ou uma multiplicação matricial explícita
+                    # O Gurobi MVar suporta multiplicação matricial (x @ C),
+                    # que é o equivalente a 'm' restrições de sum_i (x_i * C_i,j)
+                    # Certifique-se de que a dimensão seja (1 x |rt|) @ (|rt| x m) = (1 x m)
+                    
+                    # A restrição u[t, j] <= sum_i (x[t][i] * C_i,j)
+                    # É equivalente a u[t, :] <= x[t] @ C_sub_rt (se x[t] for um vetor linha, que é o padrão no Gurobi MVar)
+                    model.addConstr(u[t, :] <= x[t] @ C_sub_rt, name=f"event_feas_t{t}")
 
-            # Restrições de Dinâmica (versão original)
+            # ----------------------------------------------------
+            # OTIMIZAÇÃO 2: RESTRIÇÕES DE DINÂMICA (Acelerado com pré-cálculo NumPy)
+            # ----------------------------------------------------
+            
+            A_csr_t = A_csr.transpose().tocsr()
+
             for t in range(H):
                 rt = reach[t]
                 rtp1 = reach[t+1]
                 if rtp1.size == 0: continue
+
+                # 1. Pré-calcula TODOS os termos (idx_curr, event_idx) que podem levar a state_next (idx_next)
+                sources_dict = defaultdict(list)
+                
                 for idx_next, state_next in enumerate(rtp1):
-                    sources = []
+                    
+                    prev_states_A = A_csr_t[state_next, :].indices
+                    
                     for idx_curr, state_curr in enumerate(rt):
-                        for event_idx in range(m):
-                            if (A_csr[state_curr, state_next] > 0 and 
-                                B_csr[event_idx, state_next] > 0 and
-                                C_csr[state_curr, event_idx] > 0):
-                                sources.append((idx_curr, event_idx))
+                        if state_curr in prev_states_A:
+                            
+                            # Transições válidas para este par (state_curr, state_next)
+                            valid_events = np.nonzero(
+                                np.multiply(B_csr[:, state_next].todense().A1, C_csr[state_curr, :].todense().A1)
+                            )[0]
+                            
+                            for event_idx in valid_events:
+                                sources_dict[idx_next].append((idx_curr, event_idx))
+
+                # 2. Constrói as restrições usando o dicionário pré-calculado e quicksum
+                for idx_next in range(len(rtp1)):
+                    sources = sources_dict[idx_next]
+                    
                     if sources:
                         lhs = x[t+1][idx_next]
-                        rhs = quicksum(x[t][idx_curr] * u[t][event_idx] for idx_curr, event_idx in sources)
-                        model.addConstr(lhs == rhs, name=f"dyn_t{t}_s{state_next}")
+                        # Cria o termo quicksum (produto de variáveis binárias)
+                        rhs_term = [x[t][i] * u[t][j] for i, j in sources]
+                        rhs = quicksum(rhs_term)
+                        model.addConstr(lhs == rhs, name=f"dyn_t{t}_s{rtp1[idx_next]}")
                     else:
-                        model.addConstr(x[t+1][idx_next] == 0.0, name=f"dyn_unreachable_t{t}_s{state_next}")
-
+                        model.addConstr(x[t+1][idx_next] == 0.0, name=f"dyn_unreachable_t{t}_s{rtp1[idx_next]}")
+                        
+            # ----------------------------------------------------
             # Restrições III. Eventos Proibidos
+            # ----------------------------------------------------
             if m_P > 0:
                 for p_idx in P_indices:
                     model.addConstr(u[:, p_idx].sum() == 0.0, name=f"event_prohibited_e{p_idx}")
 
-            # Restrições IV. E.O.I. 
+            # ----------------------------------------------------
+            # Restrições IV. E.O.I.
+            # ----------------------------------------------------
             if m_I > 0 and tau is not None:
                 for i_idx in range(m_I):
                     e_idx = I_indices[i_idx]
+                    u_acum = 0.0 
                     for t in range(H):
-                        if t == 0:
-                            u_past = 0.0
-                        else:
-                            u_past = quicksum(u[tt, e_idx] for tt in range(t))
+                        u_acum += u[t, e_idx]
+                        
                         model.addConstr(tau[t, i_idx] <= u[t, e_idx], name=f"tau_upper1_e{e_idx}_t{t}")
-                        model.addConstr(tau[t, i_idx] <= 1 - u_past, name=f"tau_upper2_e{e_idx}_t{t}")
-                        model.addConstr(tau[t, i_idx] >= u[t, e_idx] - u_past, name=f"tau_lower_e{e_idx}_t{t}")
+                        model.addConstr(tau[t, i_idx] <= 1 - u_acum + u[t, e_idx], name=f"tau_upper2_e{e_idx}_t{t}")
+                        model.addConstr(tau[t, i_idx] >= u[t, e_idx] - (u_acum - u[t, e_idx]), name=f"tau_lower_e{e_idx}_t{t}")
+                        
                     model.addConstr(tau[:, i_idx].sum() <= 1.0, name=f"tau_unique_e{e_idx}")
             
+            # Reabilitar logs e fazer update
+            # model.setParam("OutputFlag", 1) # Descomente se quiser ver os logs do Gurobi
             model.update() 
             print(f"[LOG-MILP] 3. Construção do modelo Gurobi concluída em: {time.time() - start_model:.4f}s.")
             print(f"[LOG-MILP] 3.1. Total de {model.numConstrs} restrições adicionadas.")
 
             # =========================
-            # WARM START (APÓS MODELAGEM)
+            # WARM START
             # =========================
             if GLOBAL_LAST_U_SEQUENCE is not None and GLOBAL_LAST_EVENT_NAMES is not None:
                 u_prev = GLOBAL_LAST_U_SEQUENCE
                 event_names_prev = GLOBAL_LAST_EVENT_NAMES
                 H_prev = u_prev.shape[0]
 
-                # Tenta mapear eventos do modelo anterior para o atual
                 prev_to_curr_map = {name: name_to_idx.get(name) for name in event_names_prev}
 
-                # Aplica Warm Start (Assumindo que a próxima janela desliza de 1 passo)
-                # O evento ótimo no tempo t do modelo anterior é a dica para o tempo t-1 no modelo atual
                 for t in range(H):
                     if t + 1 < H_prev:
                         event_idx_prev = np.argmax(u_prev[t + 1, :])
@@ -358,9 +390,7 @@ def otimizador(Sup, estado_inicial_recorte, janela, cost_dictionary, list_evento
                         curr_idx = prev_to_curr_map.get(event_name_prev)
                         
                         if curr_idx is not None and curr_idx < m:
-                            # Define o evento ótimo do passo t+1 anterior como dica para o passo t atual
                             u[t, curr_idx].Start = 1.0
-                            print(f"[LOG-MILP] Warm Start: u[{t},{curr_idx}] = 1.0 (Evento: {event_name_prev})")
 
             # =========================
             # OBJETIVO
@@ -397,17 +427,19 @@ def otimizador(Sup, estado_inicial_recorte, janela, cost_dictionary, list_evento
             print(f"[LOG-MILP] 5. Otimização finalizada em: {time.time() - start_optimize:.4f}s.")
 
             # =========================
-            # PÓS-PROCESSAMENTO (DENTRO DO MUTEX PARA ATUALIZAR GLOBAL)
+            # PÓS-PROCESSAMENTO
             # =========================
             if model_status in [GRB.OPTIMAL, GRB.TIME_LIMIT] and model.SolCount > 0:
                 print(f"[LOG-MILP] 5.1. Solução encontrada. Status: {model_status}.")
                 
-                # Armazena a nova solução em GLOBAL_LAST_U_SEQUENCE
                 u_sol = u.X
                 GLOBAL_LAST_U_SEQUENCE = u_sol
                 GLOBAL_LAST_EVENT_NAMES = event_names
                 
-                seq_idx = [np.argmax(u_sol[t, :]) for t in range(H)] 
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", category=RuntimeWarning)
+                    seq_idx = [np.argmax(u_sol[t, :]) for t in range(H)] 
+                
                 event_seq = [event_names[i] for i in seq_idx]
                 
                 cost_states_val = ALPHA_STATE * cost_states_E_D.getValue()
@@ -422,7 +454,6 @@ def otimizador(Sup, estado_inicial_recorte, janela, cost_dictionary, list_evento
             else:
                 print(f"[LOG-MILP] 5.1. Otimização falhou. Status: {model_status}.")
                 print(f"[×] Otimização falhou. Status: {model_status}")
-                # Não atualiza a variável global se falhar
 
         except Exception as e:
             print(f"[ERRO NO GUROBI] {e}")
@@ -431,8 +462,6 @@ def otimizador(Sup, estado_inicial_recorte, janela, cost_dictionary, list_evento
         finally:
             if model is not None:
                 try:
-                    # O dispose deve estar DENTRO do Mutex para ser seguro,
-                    # conforme sua proposta.
                     model.dispose()
                     print("[LOG-MILP] 6. Recursos do Gurobi liberados.")
                 except Exception as e:
