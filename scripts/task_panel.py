@@ -62,7 +62,7 @@ class TaskPanel:
 
         # -------- ROS --------
         rospy.init_node("task_panel", anonymous=False)
-        self.pub_tarefas = rospy.Publisher("/tarefas_afazer", String, queue_size=10)
+        self.pub_tarefas = rospy.Publisher("/task_todo", String, queue_size=10)
 
         # -------- Dados do grafo --------
         try:
