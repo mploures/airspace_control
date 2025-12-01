@@ -346,9 +346,9 @@ class UTMROSInterface:
 
         # 1. Publicadores
         self.pub_state        = rospy.Publisher(f"/{self.name}/state", String, queue_size=10, latch=True) 
-        self.pub_global_prohibited = rospy.Publisher("/eventos_proibidos", String, queue_size=10, latch=True)
+        self.pub_global_prohibited = rospy.Publisher("/prohibited_events", String, queue_size=10, latch=True)
         # Este é o canal que o VANTs escutam, com o formato ID:F,C
-        self.pub_tarefas      = rospy.Publisher("/tarefas", String, queue_size=10) 
+        self.pub_tarefas      = rospy.Publisher("/task", String, queue_size=10) 
         self.pub_events = rospy.Publisher(f"/{self.name}/possible_events", String, queue_size=10, latch=True)
         self.pub_enabled_events = rospy.Publisher(f"/{self.name}/enabled_events", String, queue_size=10, latch=True)
         self.pub_marked = rospy.Publisher(f"/{self.name}/is_marked", String, queue_size=10, latch=True)
@@ -356,7 +356,7 @@ class UTMROSInterface:
         # 2. Subscribers
         self.sub_event        = rospy.Subscriber("/event", String, self._on_event, queue_size=50)
         # Este canal recebe o formato simples F,C
-        self.sub_tarefas_afazer = rospy.Subscriber("/tarefas_afazer", String, self._on_tarefa_afazer, queue_size=10)
+        self.sub_tarefas_afazer = rospy.Subscriber("/task_todo", String, self._on_tarefa_afazer, queue_size=10)
 
         rospy.sleep(0.5)
         self._publish_state() # Publica o estado inicial
@@ -365,7 +365,7 @@ class UTMROSInterface:
 
     def _dispatch_next_tasks_if_possible(self):
         """
-        Envia tarefas da fila /tarefas_afazer para /tarefas,
+        Envia tarefas da fila /task_todo para /task,
         RESPEITANDO o limite de UVs com tarefa ativa.
         PUBLICA a tarefa no formato ID_TAREFA:FORNECEDOR,CLIENTE.
         """
@@ -534,7 +534,7 @@ class UTMROSInterface:
 
         # Verificação básica de formato (deve conter uma vírgula)
         if "," not in nodes_raw:
-            rospy.logwarn(f"[{self.name}] Tarefa recebida em /tarefas_afazer com formato inválido (sem vírgula): {nodes_raw}")
+            rospy.logwarn(f"[{self.name}] Tarefa recebida em /task_todo com formato inválido (sem vírgula): {nodes_raw}")
             return
             
         # Geração de ID e enfileiramento ATÔMICO
@@ -634,7 +634,7 @@ class UTMROSInterface:
         global_str = ",".join(sorted(global_prohibited))
         
         self.pub_global_prohibited.publish(String(data=global_str))
-        rospy.loginfo(f"[{self.name}] Eventos PROIBIDOS Globais Publicados em /eventos_proibidos: {global_str}")
+        rospy.loginfo(f"[{self.name}] Eventos PROIBIDOS Globais Publicados em /prohibited_events: {global_str}")
 
         # --- 3. Publica Eventos Habilitados (Permitidos) ---
         enabled_events = self._get_enabled_events()

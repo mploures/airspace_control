@@ -172,7 +172,7 @@ class TaskPanel:
         try:
             msg = String(data=payload)
             self.pub_tarefas.publish(msg)
-            rospy.loginfo(f"[task_panel] Tarefa enviada em /tarefas_afazer: '{payload}'")
+            rospy.loginfo(f"[task_panel] Tarefa enviada em /task_todo: '{payload}'")
             self.label_status.config(
                 text=f"Status: tarefa enviada -> {payload}",
                 fg="green"
