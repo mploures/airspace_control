@@ -622,9 +622,9 @@ class VANT:
                     if self._time_close_to_goal == 0.0:
                         # Começa a contagem
                         self._time_close_to_goal = current_time
-                        self.ros_node.loginfo(
-                            f"[{self.name}] ⏱️ Entrou no raio GAL (R={self.loose_goal_eps:.1f}m). Iniciando timer."
-                        )
+                        #self.ros_node.loginfo(
+                        #    f"[{self.name}] ⏱️ Entrou no raio GAL (R={self.loose_goal_eps:.1f}m). Iniciando timer."
+                        #)
 
                     time_spent_close = current_time - self._time_close_to_goal
                     
@@ -674,11 +674,11 @@ class VANT:
                 if self.goal:
                     distance_log = math.hypot(self.goal[0] - self.x, self.goal[1] - self.y)
                     time_log = current_time - self._time_close_to_goal if self._time_close_to_goal > 0.0 else 0.0
-                    self.ros_node.loginfo(
-                        f"[{self.name}] 📊 Estado: pos=({self.x:.1f}, {self.y:.1f}) "
-                        f"dist={distance_log:.1f}m. GAL T={time_log:.1f}s. "
-                        f"cmd=({v_cmd:.2f}, {w_cmd:.2f}) soc={self.soc:.1%}"
-                    )
+                    #self.ros_node.loginfo(
+                    #    f"[{self.name}] 📊 Estado: pos=({self.x:.1f}, {self.y:.1f}) "
+                    #    f"dist={distance_log:.1f}m. GAL T={time_log:.1f}s. "
+                    #    f"cmd=({v_cmd:.2f}, {w_cmd:.2f}) soc={self.soc:.1%}"
+                    #)
                 last_log_time = current_time
 
             self.rate.sleep()

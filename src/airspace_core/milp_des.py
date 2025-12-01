@@ -184,7 +184,7 @@ def otimizador(Sup, estado_inicial_recorte, janela, cost_dictionary, list_evento
         return [], -1
         
     H = janela
-    print(f"[LOG-MILP] 1. Iniciando otimizador para Horizonte H={H}")
+    #print(f"[LOG-MILP] 1. Iniciando otimizador para Horizonte H={H}")
 
     # =================================================================
     # ETAPAS FORA DO MUTEX: PRÉ-PROCESSAMENTO INTENSIVO
@@ -197,7 +197,7 @@ def otimizador(Sup, estado_inicial_recorte, janela, cost_dictionary, list_evento
     resultado_matrices = extract_automaton_matrices(recorte, k) 
 
     A_csr, B_csr, C_csr, W, D_np, event_dict, state_index = resultado_matrices
-    print(f"[LOG-MILP] 1.1. Recorte e Extração concluídos em: {time.time() - start_recorte:.4f}s.")
+    #print(f"[LOG-MILP] 1.1. Recorte e Extração concluídos em: {time.time() - start_recorte:.4f}s.")
     
     n = A_csr.shape[0]
     m = C_csr.shape[1] 
@@ -235,7 +235,7 @@ def otimizador(Sup, estado_inicial_recorte, janela, cost_dictionary, list_evento
     inviaveis_cols = np.where((C_csr.indptr[1:] - C_csr.indptr[:-1]) == 0)[0].astype(np.int32) 
     reach = compute_reach(A_csr, H, start=0, inviaveis=inviaveis_cols)
     pos = [{int(j): k for k, j in enumerate(reach[t])} for t in range(H+1)]
-    print(f"[LOG-MILP] 1.5. Pré-cálculo de alcançabilidade concluído em: {time.time() - start_reach:.4f}s.")
+    #print(f"[LOG-MILP] 1.5. Pré-cálculo de alcançabilidade concluído em: {time.time() - start_reach:.4f}s.")
     
     # =================================================================
     # ETAPAS DENTRO DO MUTEX: INTERAÇÃO COM O GUROBI (MODELAGEM/SOLUÇÃO)
@@ -244,7 +244,7 @@ def otimizador(Sup, estado_inicial_recorte, janela, cost_dictionary, list_evento
     model_status = GRB.LOADED 
 
     with GLOBAL_MILP_LOCK:
-        print("[LOG-MILP] 2. Configurando Modelo Gurobi (MILP) DENTRO DO MUTEX.")
+        #print("[LOG-MILP] 2. Configurando Modelo Gurobi (MILP) DENTRO DO MUTEX.")
         start_model = time.time()
         model = None 
 
@@ -369,8 +369,8 @@ def otimizador(Sup, estado_inicial_recorte, janela, cost_dictionary, list_evento
             # Reabilitar logs e fazer update
             # model.setParam("OutputFlag", 1) # Descomente se quiser ver os logs do Gurobi
             model.update() 
-            print(f"[LOG-MILP] 3. Construção do modelo Gurobi concluída em: {time.time() - start_model:.4f}s.")
-            print(f"[LOG-MILP] 3.1. Total de {model.numConstrs} restrições adicionadas.")
+            #print(f"[LOG-MILP] 3. Construção do modelo Gurobi concluída em: {time.time() - start_model:.4f}s.")
+            #print(f"[LOG-MILP] 3.1. Total de {model.numConstrs} restrições adicionadas.")
 
             # =========================
             # WARM START
@@ -413,7 +413,7 @@ def otimizador(Sup, estado_inicial_recorte, janela, cost_dictionary, list_evento
 
             final_objective = ALPHA_STATE * cost_states_E_D + cost_incentive
             model.setObjective(final_objective, GRB.MINIMIZE)
-            print("[LOG-MILP] 4. Função Objetivo configurada.")
+            #print("[LOG-MILP] 4. Função Objetivo configurada.")
 
 
             # =========================
@@ -424,13 +424,13 @@ def otimizador(Sup, estado_inicial_recorte, janela, cost_dictionary, list_evento
             model.optimize()
             model_status = model.status 
             
-            print(f"[LOG-MILP] 5. Otimização finalizada em: {time.time() - start_optimize:.4f}s.")
+            #print(f"[LOG-MILP] 5. Otimização finalizada em: {time.time() - start_optimize:.4f}s.")
 
             # =========================
             # PÓS-PROCESSAMENTO
             # =========================
             if model_status in [GRB.OPTIMAL, GRB.TIME_LIMIT] and model.SolCount > 0:
-                print(f"[LOG-MILP] 5.1. Solução encontrada. Status: {model_status}.")
+                #print(f"[LOG-MILP] 5.1. Solução encontrada. Status: {model_status}.")
                 
                 u_sol = u.X
                 GLOBAL_LAST_U_SEQUENCE = u_sol
@@ -446,13 +446,13 @@ def otimizador(Sup, estado_inicial_recorte, janela, cost_dictionary, list_evento
                 cost_incentive_val = cost_incentive.getValue() if m_I > 0 and tau is not None else 0.0
                 
                 print(f"[✓] Solução encontrada (H={H}):")
-                print(f"    Objetivo: {model.objVal:.2f}")
-                print(f"    Custo Estados (E, D): {cost_states_val:.2f}")
-                print(f"    Incentivo: {cost_incentive_val:.2f}")
+                #print(f"    Objetivo: {model.objVal:.2f}")
+                #print(f"    Custo Estados (E, D): {cost_states_val:.2f}")
+                #print(f"    Incentivo: {cost_incentive_val:.2f}")
                 print(f"    Sequência de Eventos: {event_seq}")
 
             else:
-                print(f"[LOG-MILP] 5.1. Otimização falhou. Status: {model_status}.")
+                #print(f"[LOG-MILP] 5.1. Otimização falhou. Status: {model_status}.")
                 print(f"[×] Otimização falhou. Status: {model_status}")
 
         except Exception as e:
@@ -463,9 +463,9 @@ def otimizador(Sup, estado_inicial_recorte, janela, cost_dictionary, list_evento
             if model is not None:
                 try:
                     model.dispose()
-                    print("[LOG-MILP] 6. Recursos do Gurobi liberados.")
+                    #print("[LOG-MILP] 6. Recursos do Gurobi liberados.")
                 except Exception as e:
-                    print(f"[LOG-MILP] 6. Erro ao liberar recursos: {e}")
+                    #print(f"[LOG-MILP] 6. Erro ao liberar recursos: {e}")
                     pass
         
     return event_seq, model_status

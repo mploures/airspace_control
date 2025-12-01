@@ -1317,7 +1317,7 @@ class VANTInstance:
 
     def _run_milp_for_current_task(self):
         """
-        CORREÇÃO: Verificação robusta de conclusão de tarefa
+        CORREÇÃO: Priorização de VERTIPORT na fase de retorno
         """
         if not self.enable_ros:
             return
@@ -1334,7 +1334,7 @@ class VANTInstance:
                 rospy.loginfo(f"[{self.name}] Tentativa de MILP sem tarefa ativa. Abortando.")
                 return
 
-            # ✅ VERIFICAÇÃO COMPLETA DA TAREFA
+            # ✅ VERIFICAÇÃO COMPLETA DA TAREFA - COM ATUALIZAÇÃO
             is_task_completely_finished = (
                 self.terminou[0] and  # Coleta concluída
                 self.terminou[1] and  # Entrega concluída  
@@ -1347,26 +1347,47 @@ class VANTInstance:
                 return
 
             tarefa_completa = self._tarefa_ativa
-            tarefa, nodes_raw = tarefa_completa.split(":", 1)
+            task_id, nodes_raw = tarefa_completa.split(":", 1)
             fornecedor, cliente = nodes_raw.split(",")
 
             # Cálculo do MILP
             H = self._planning_horizon
             
-            # 🎯 EVENTOS DE INTERESSE DINÂMICOS - REMOVE OS QUE JÁ ACONTECERAM
+            # 🎯 EVENTOS DE INTERESSE DINÂMICOS - PRIORIZANDO VERTIPORT
             eventos_interesse_gen = []
             volta = []
             
             if self.terminou[0] and self.terminou[1]: 
-                # Fase 3: Voltando para base (APENAS se ainda não voltou)
+                # Fase 3: Voltando para VERTIPORT (prioridade máxima)
                 if not self.terminou[2]:
+                    # 🏁 PRIORIDADE: VERTIPORT primeiro, depois ESTACAO
+                    vertiports = []
+                    estacoes = []
+                    
                     for n in self.model.G.nodes():
                         tipo = self.model._tipo_norm(self.model.G.nodes[n].get("tipo", ""))
-                        if tipo in {"VERTIPORT"}:
+                        if tipo == "VERTIPORT":
+                            vertiports.append(n)
+                        elif tipo == "ESTACAO":
+                            estacoes.append(n)
+                    
+                    # Primeiro tenta VERTIPORTS
+                    for n in vertiports:
+                        for u, v, k, data in self.model.G.in_edges(n, keys=True, data=True):
+                            eventos_interesse_gen.append(f"pega_{u}{n}")
+                            volta.append(f"pega_{u}{n}_{self.id}")
+                    
+                    # Se não encontrou VERTIPORTS, tenta ESTAÇÕES
+                    if not eventos_interesse_gen:
+                        for n in estacoes:
                             for u, v, k, data in self.model.G.in_edges(n, keys=True, data=True):
                                 eventos_interesse_gen.append(f"pega_{u}{n}")
                                 volta.append(f"pega_{u}{n}_{self.id}")
-                    rospy.loginfo(f"[{self.name}] 🏠 Fase 3: Retornando à base")
+                    
+                    if eventos_interesse_gen:
+                        rospy.loginfo(f"[{self.name}] 🏠 Fase 3: Retornando à base - {len(vertiports)} VERTIPORT(s), {len(estacoes)} ESTACAO(s) encontrados")
+                    else:
+                        rospy.logwarn(f"[{self.name}] ❌ Nenhuma base (VERTIPORT/ESTACAO) encontrada para retorno!")
             else:
                 # Fase 1 e 2: Trabalho no fornecedor e cliente
                 # ✅ APENAS eventos de interesse que AINDA NÃO ACONTECERAM
@@ -1384,6 +1405,8 @@ class VANTInstance:
                 # Força verificação final
                 if self.terminou[0] and self.terminou[1] and not self.terminou[2]:
                     rospy.loginfo(f"[{self.name}] 🔍 Verificando se retorno à base foi concluído...")
+                    # Força detecção de base pelo estado atual
+                    self._detect_base_return("", "")
                 else:
                     self._complete_current_task()
                     return
@@ -1394,7 +1417,6 @@ class VANTInstance:
             rospy.loginfo(f"[{self.name}] 🎯 Eventos de interesse DINÂMICOS: {eventos_interesse_id}")
             rospy.loginfo(f"[{self.name}] 📊 Progresso: coleta={self.terminou[0]}, entrega={self.terminou[1]}, base={self.terminou[2]}")
 
-            # Resto do código permanece igual...
             with self._prohibited_lock:
                 global_prohibited_generic = self._global_prohibited_generic.copy()
 
@@ -1421,6 +1443,11 @@ class VANTInstance:
 
             rospy.loginfo(f"[{self.name}] MILP retornou status={status}, seq={event_seq}")
 
+            # 🚨 VERIFICAÇÃO FINAL ANTES DE PROCESSAR RESULTADO
+            if self._tarefa_ativa is None:
+                rospy.loginfo(f"[{self.name}] Tarefa foi cancelada durante cálculo MILP")
+                return
+
             # Busca APENAS o PRIMEIRO evento controlável da sequência
             next_controllable = None
             
@@ -1438,8 +1465,9 @@ class VANTInstance:
                         rospy.loginfo(f"[{self.name}] 🎯 Evento de COLETA encontrado na sequência MILP")
                     elif next_controllable == f"comeca_trabalho_{cliente}_{self.id}":
                         rospy.loginfo(f"[{self.name}] 🎯 Evento de ENTREGA encontrado na sequência MILP")
-                    elif len(volta) > 0 and next_controllable in volta:
-                        rospy.loginfo(f"[{self.name}] 🎯 Evento de RETORNO À BASE encontrado na sequência MILP")
+                    # 🎯 CORREÇÃO: Detecção de evento de retorno à base sem variável 'u' indefinida
+                    elif any(base_node in next_controllable for base_node in ["VERTIPORT", "ESTACAO"]):
+                        rospy.loginfo(f"[{self.name}] 🎯 Evento de RETORNO À BASE encontrado na sequência MILP: {next_controllable}")
                     
                     rospy.loginfo(f"[{self.name}] ✅ Próximo evento controlável encontrado: {next_controllable}")
                     break
@@ -1452,15 +1480,18 @@ class VANTInstance:
                 self._publish_buffered_event_if_enabled()
             else:
                 rospy.logwarn(f"[{self.name}] ❌ Nenhum evento controlável encontrado na sequência MILP")
-                # Se não encontrou evento controlável e a tarefa está concluída, para
+                # Se não encontrou evento controlável, verifica se tarefa está concluída
                 if self.terminou[0] and self.terminou[1] and self.terminou[2]:
                     rospy.loginfo(f"[{self.name}] 🎉 Tarefa completamente concluída - limpando buffer")
                     self._complete_current_task()
                 else:
+                    rospy.loginfo(f"[{self.name}] ⏳ Aguardando eventos não controláveis para progresso...")
                     self._clear_buffer()
 
         except Exception as e:
             rospy.logerr(f"[{self.name}] Erro executando MILP: {e}")
+            import traceback
+            rospy.logerr(traceback.format_exc())
             self._clear_buffer()
         finally:
             self._is_calculating_milp = False
@@ -1472,17 +1503,24 @@ class VANTInstance:
             rospy.loginfo(f"[{self.name}] 🎉 MISSÃO COMPLETAMENTE CONCLUÍDA: {self._tarefa_ativa}")
             rospy.loginfo(f"[{self.name}] 📊 Estatísticas finais: coleta={self.terminou[0]}, entrega={self.terminou[1]}, base={self.terminou[2]}")
         
-        # 🚨 LIMPEZA COMPLETA
-        self._tarefa_ativa = None
-        self.terminou = [False, False, False]  # Reset para próxima tarefa
+        # 🚨 LIMPEZA COMPLETA E SEGURA
+        with self._milp_thread_lock:
+            self._tarefa_ativa = None
+            self.terminou = [False, False, False]  # Reset para próxima tarefa
+            self._is_calculating_milp = False
+            
         self._clear_buffer()
         
-        # Para qualquer cálculo MILP em andamento
-        self._is_calculating_milp = False
+        # Publica evento de conclusão se ROS estiver ativo
+        if self.enable_ros:
+            import rospy
+            from std_msgs.msg import String
+            rospy.loginfo(f"[{self.name}] 📢 Publicando conclusão de tarefa")
+            self.pub_cmd_event.publish(String(data=f"completa_tarefa_{self.id}"))
 
     def step(self, ev: str) -> bool:
         """
-        CORREÇÃO: Verificação de conclusão de tarefa em cada step
+        CORREÇÃO: Verificação robusta de conclusão de tarefa com atualização automática
         """
         if not self._should_process(ev):
             return False
@@ -1519,8 +1557,15 @@ class VANTInstance:
         if not transicionou:
             return False
 
-        # ------------------ VERIFICAÇÃO DE CONCLUSÃO DE TAREFA ------------------
+        # 🚨 ATUALIZAÇÃO AUTOMÁTICA DO PROGRESSO DA TAREFA
+        self._update_task_progress(ev)
+
+        # Atualização de custos dinâmicos
         self._update_dynamic_cost()
+        
+        # ✅ VERIFICAÇÃO EXTRA: Força detecção de base se necessário
+        if self.terminou[0] and self.terminou[1] and not self.terminou[2]:
+            self._detect_base_return("", "")  # Força verificação pelo estado atual
         
         # ✅ VERIFICAÇÃO ROBUSTA DE CONCLUSÃO
         is_task_completely_finished = (
@@ -1530,7 +1575,9 @@ class VANTInstance:
         )
         
         if self._tarefa_ativa is not None and is_task_completely_finished:
-            rospy.loginfo(f"[{self.name}] 🎉 TAREFA DETECTADA COMO CONCLUÍDA NO STEP - Finalizando")
+            if self.enable_ros:
+                import rospy
+                rospy.loginfo(f"[{self.name}] 🎉 TAREFA DETECTADA COMO CONCLUÍDA NO STEP - Finalizando")
             self._complete_current_task()
             return True
 
@@ -1542,39 +1589,147 @@ class VANTInstance:
             # 🔥 LÓGICA PRINCIPAL COM MUTEX SEGURO
             if evento_foi_controlavel:
                 # ✅ Publicou evento controlável → Calcula próximo
-                rospy.loginfo(f"[{self.name}] 🔄 Gatilho: evento CONTROLÁVEL '{ev}' publicado → Calculando próximo MILP")
+                if self.enable_ros:
+                    import rospy
+                    rospy.loginfo(f"[{self.name}] 🔄 Gatilho: evento CONTROLÁVEL '{ev}' publicado → Calculando próximo MILP")
                 self._trigger_milp_calculation()
                 
             elif evento_foi_nao_controlavel:
                 # 📨 Recebeu evento NÃO controlável → Publica próximo do buffer
-                rospy.loginfo(f"[{self.name}] 🔄 Gatilho: evento NÃO controlável '{ev}' recebido → Publicando próximo do buffer")
+                if self.enable_ros:
+                    import rospy
+                    rospy.loginfo(f"[{self.name}] 🔄 Gatilho: evento NÃO controlável '{ev}' recebido → Publicando próximo do buffer")
                 self._publish_buffered_event_if_enabled()
 
         return True
 
-    def _publish_buffered_event_if_enabled(self):
-        """Tenta publicar o evento do buffer se estiver habilitado - COM MUTEX SEGURO"""
-        import rospy
-        from std_msgs.msg import String
-        
-        # 🔥 PRIMEIRO: Verifica se há evento no buffer (com mutex rápido)
-        buffered_event = self._get_buffered_event()
-        if not buffered_event:
-            return False
-        
-        # 🔥 SEGUNDO: Verifica se está habilitado (sem mutex para evitar deadlock)
-        enabled_events = self.enabled_events()
-        
-        if buffered_event in enabled_events:
-            rospy.loginfo(f"[{self.name}] 🚀 Publicando evento do buffer: {buffered_event}")
-            self.pub_cmd_event.publish(String(data=buffered_event))
+
+    def _update_task_progress(self, ev: str):
+        """
+        ATUALIZAÇÃO ROBUSTA: Atualiza automaticamente o progresso da tarefa baseado nos eventos
+        CORREÇÃO: Detecção correta de retorno ao VERTIPORT
+        """
+        if not self._tarefa_ativa:
+            return
             
-            # 🔥 TERCEIRO: Remove do buffer (com mutex rápido)
-            self._remove_buffered_event()
-            return True
-        else:
-            rospy.loginfo(f"[{self.name}] ⏳ Evento do buffer não habilitado: {buffered_event}")
-            return False
+        if self.enable_ros:
+            import rospy
+            
+        # Extrai informações da tarefa atual
+        try:
+            tarefa_completa = self._tarefa_ativa
+            task_id, nodes_raw = tarefa_completa.split(":", 1)
+            fornecedor, cliente = nodes_raw.split(",")
+        except:
+            return
+
+        evento_generico = self.to_generic(ev)
+        
+        # 🎯 DETECÇÃO AUTOMÁTICA DE CONCLUSÃO DE FASE
+        if evento_generico == f"fim_trabalho_{fornecedor}":
+            if not self.terminou[0]:
+                self.terminou[0] = True
+                if self.enable_ros:
+                    rospy.loginfo(f"[{self.name}] ✅ FASE 1 CONCLUÍDA: Coleta finalizada em {fornecedor}")
+                    
+        elif evento_generico == f"fim_trabalho_{cliente}":
+            if not self.terminou[1]:
+                self.terminou[1] = True
+                if self.enable_ros:
+                    rospy.loginfo(f"[{self.name}] ✅ FASE 2 CONCLUÍDA: Entrega finalizada em {cliente}")
+        
+        # 🏠 DETECÇÃO DE RETORNO À BASE (VERTIPORT) - CORRIGIDA
+        self._detect_base_return(ev, evento_generico)
+        
+        # 📊 LOG DE PROGRESSO ATUALIZADO
+        if self.enable_ros and any(self.terminou):
+            rospy.loginfo(f"[{self.name}] 📊 PROGRESSO ATUALIZADO: coleta={self.terminou[0]}, entrega={self.terminou[1]}, base={self.terminou[2]}")
+
+    def _detect_base_return(self, ev: str, evento_generico: str):
+        """
+        CORREÇÃO: Detecção específica e robusta de retorno ao VERTIPORT
+        """
+        if self.enable_ros:
+            import rospy
+        
+        # Só detecta retorno se as fases 1 e 2 estiverem concluídas
+        if not (self.terminou[0] and self.terminou[1]) or self.terminou[2]:
+            return
+        
+        # 🔍 MÉTODO 1: Detecção por evento de chegada ao VERTIPORT
+        if evento_generico.startswith("chega_") or evento_generico.startswith("libera_"):
+            # Extrai o nó de destino do evento
+            if evento_generico.startswith("chega_"):
+                # Formato: chega_X_Y → Y é o destino
+                partes = evento_generico.split('_')
+                if len(partes) >= 3:
+                    no_destino = partes[2]  # Segundo elemento após 'chega'
+            else:  # libera_
+                # Formato: libera_X_Y → Y é o destino  
+                partes = evento_generico.split('_')
+                if len(partes) >= 3:
+                    no_destino = partes[2]  # Segundo elemento após 'libera'
+            
+            # Verifica se o nó de destino é um VERTIPORT
+            if hasattr(self, 'model') and no_destino in self.model.G.nodes:
+                tipo_no = self.model._tipo_norm(self.model.G.nodes[no_destino].get("tipo", ""))
+                if tipo_no == "VERTIPORT":
+                    if not self.terminou[2]:
+                        self.terminou[2] = True
+                        if self.enable_ros:
+                            rospy.loginfo(f"[{self.name}] ✅ FASE 3 CONCLUÍDA: Retorno ao VERTIPORT {no_destino} detectado via evento")
+                        return
+        
+        # 🔍 MÉTODO 2: Detecção por análise do estado atual do supervisor
+        estado_atual = str(self._state)
+        componentes = [c.strip() for c in estado_atual.split('|') if c.strip()]
+        
+        for componente in componentes:
+            if componente in self.model.G.nodes:
+                tipo_no = self.model._tipo_norm(self.model.G.nodes[componente].get("tipo", ""))
+                if tipo_no == "VERTIPORT":
+                    if not self.terminou[2]:
+                        self.terminou[2] = True
+                        if self.enable_ros:
+                            rospy.loginfo(f"[{self.name}] ✅ FASE 3 CONCLUÍDA: Estado atual no VERTIPORT {componente}")
+                        return
+        
+        # 🔍 MÉTODO 3: Detecção por eventos de carregamento no VERTIPORT
+        if evento_generico.startswith("carregar_"):
+            partes = evento_generico.split('_')
+            if len(partes) >= 2:
+                no_carregamento = partes[1]
+                if no_carregamento in self.model.G.nodes:
+                    tipo_no = self.model._tipo_norm(self.model.G.nodes[no_carregamento].get("tipo", ""))
+                    if tipo_no == "VERTIPORT":
+                        if not self.terminou[2]:
+                            self.terminou[2] = True
+                            if self.enable_ros:
+                                rospy.loginfo(f"[{self.name}] ✅ FASE 3 CONCLUÍDA: Carregamento no VERTIPORT {no_carregamento}")
+                        return
+    def _publish_buffered_event_if_enabled(self):
+            """Tenta publicar o evento do buffer se estiver habilitado - COM MUTEX SEGURO"""
+            import rospy
+            from std_msgs.msg import String
+            
+            # 🔥 PRIMEIRO: Verifica se há evento no buffer (com mutex rápido)
+            buffered_event = self._get_buffered_event()
+            if not buffered_event:
+                return False
+            
+            # 🔥 SEGUNDO: Verifica se está habilitado (sem mutex para evitar deadlock)
+            enabled_events = self.enabled_events()
+            
+            if buffered_event in enabled_events:
+                rospy.loginfo(f"[{self.name}] 🚀 Publicando evento do buffer: {buffered_event}")
+                self.pub_cmd_event.publish(String(data=buffered_event))
+                
+                # 🔥 TERCEIRO: Remove do buffer (com mutex rápido)
+                self._remove_buffered_event()
+                return True
+            else:
+                rospy.loginfo(f"[{self.name}] ⏳ Evento do buffer não habilitado: {buffered_event}")
+                return False
 
     # --------------------------- ROS (opcional) ---------------------------
     def _publish_ros(self):
