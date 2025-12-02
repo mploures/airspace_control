@@ -244,13 +244,11 @@ class UTMModel:
         # Conjunto de TODOS os eventos no sistema (pega + bloqueio/desbloqueio)
         Sigma_total = set(self.eventos.values())
 
+        nos_especiais = {"VERTIPORT", "FORNECEDOR", "CLIENTE", "ESTACAO"}
+
         for v, data in G.nodes(data=True):
             
-            # === BYPASS PARA VERTIPORT ===
-            # Se o nó é um VERTIPORT, não criamos a especificação Mutex
-            # Assumindo que o tipo de nó pode ser inferido pelo nome (e.g., "VERTIPORT_0")
-            if "VERTIPORT" in str(v).upper():
-                # O agente pode estar sempre "dentro" do VERTIPORT
+            if any(especial in str(v).upper() for especial in nos_especiais):
                 continue 
                 
             # 1. Estados e Transições
